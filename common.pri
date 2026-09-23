@@ -20,6 +20,6 @@ win32 {
     }
 }
 
-# ── ONNX Runtime（XFeat 推理） ──
+# ── ONNX Runtime（XFeat 推理；仅 include 路径全局共享，-lonnxruntime 由 xfeat 插件 .pro 单独链接，
+#    避免所有插件/主程序都带上 onnxruntime.dll 运行时依赖） ──
 INCLUDEPATH += $$ONNXRUNTIME_DIR/include
-LIBS += -L$$ONNXRUNTIME_DIR/lib -lonnxruntime
