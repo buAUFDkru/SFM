@@ -238,6 +238,14 @@ int Initialization::selectModel(const std::vector<cv::Point2d> &pts1,
 {
     const int n = static_cast<int>(pts1.size());
 
+    // 点数不足以估计任何几何模型（H 最少 4 点），直接宣告失败
+    if (n < 4) {
+        F = cv::Mat();
+        H = cv::Mat();
+        outInlierMask.clear();
+        return -1;
+    }
+
     // 匹配点不足8个，无法估计F矩阵，退化为H模型
     if (n < 8) {
         H = cv::findHomography(pts1, pts2, cv::RANSAC, ransacThreshold, outInlierMask);
