@@ -29,8 +29,11 @@ HEADERS += \
     algorithm/BundleAdjustment.h \
     algorithm/PointCloudBuilder.h \
     algorithm/Triangulate.h \
+    algorithm/StereoRectifier.h \
     pipeline/IDenseReconstructor.h \
     pipeline/DenseReconstructionFactory.h \
+    pipeline/StereoSGBMReconstructor.h \
+    pipeline/PatchMatchReconstructor.h \
     pipeline/ReconstructionPipeline.h \
     pipeline/ReconstructionWorker.h \
     pipeline/PipelineRunner.h
@@ -44,7 +47,10 @@ SOURCES += \
     algorithm/BundleAdjustment.cpp \
     algorithm/PointCloudBuilder.cpp \
     algorithm/Triangulate.cpp \
+    algorithm/StereoRectifier.cpp \
     pipeline/DenseReconstructionFactory.cpp \
+    pipeline/StereoSGBMReconstructor.cpp \
+    pipeline/PatchMatchReconstructor.cpp \
     pipeline/ReconstructionPipeline.cpp \
     pipeline/ReconstructionWorker.cpp \
     pipeline/PipelineRunner.cpp
