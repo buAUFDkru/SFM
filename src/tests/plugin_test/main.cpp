@@ -1,9 +1,12 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QEventLoop>
+#include <QFile>
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QMessageLogContext>
+#include <QStringList>
 
 #include <atomic>
 #include <algorithm>
@@ -16,6 +19,7 @@
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/Initialization.h"
@@ -26,6 +30,8 @@
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
 #include "plugin/PluginRegistry.h"
+#include "pipeline/ReconstructionPipeline.h"
+#include "pipeline/PipelineRunner.h"
 
 namespace {
 
@@ -33,6 +39,10 @@ int failures = 0;
 
 void check(bool cond, const QString &name)
 {
+    // 同步直写 stderr，确保即便 Qt 消息处理器被替换/缓冲区被吞也能看到结果
+    std::fprintf(stderr, "[chk:%s] %s\n", cond ? "PASS" : "FAIL",
+                 name.toLocal8Bit().constData());
+    std::fflush(stderr);
     if (cond) {
         qInfo().noquote() << "[PASS]" << name;
     } else {
@@ -495,6 +505,229 @@ void runMatcherServiceSmoke(PluginRegistry &reg)
     }
 }
 
+// ── P3b 重建管线冒烟 ────────────────────────────────────────────────────────
+
+/// 回调捕获：进度/日志/阶段点云
+class PipelineCapture : public IReconstructionCallbacks
+{
+public:
+    QStringList logs;
+    int cloudEvents = 0;
+    void onProgress(const QString &, int) override {}
+    void onLog(const QString &message) override { logs.push_back(message); }
+    void onStagePointCloudReady(const QVector<float> &, const QVector<float> &,
+                                const QString &) override { ++cloudEvents; }
+    void onDenseReconstructionMethodRequested() override {}
+};
+
+/// 手动归一化 cv::Vec3d
+static cv::Vec3d normalize3(const cv::Vec3d &v)
+{
+    const double len = std::sqrt(v.dot(v));
+    if (len < 1e-12) return v;
+    return v / len;
+}
+
+/// 渲染带噪声纹理球体场景的多视图（透视投影，确定性种子）
+static bool renderSphereViews(const QString &dir, QStringList &outFiles)
+{
+    const int W = 640, H = 480;
+    const cv::Mat K = estimateK(W, H);
+
+    // 噪声纹理（确定性种子）+ 低频块状结构增强尺度特征
+    cv::Mat tex(512, 512, CV_8UC3);
+    {
+        cv::RNG trng(777);
+        trng.fill(tex, cv::RNG::UNIFORM, 0, 255);
+        cv::Mat coarse(64, 64, CV_8UC3);
+        cv::RNG crng(12345);
+        crng.fill(coarse, cv::RNG::UNIFORM, 0, 255);
+        cv::Mat coarseBig;
+        cv::resize(coarse, coarseBig, tex.size(), 0, 0, cv::INTER_NEAREST);
+        cv::addWeighted(tex, 0.5, coarseBig, 0.5, 0, tex);
+    }
+
+    const cv::Vec3d center(0, 0, 0);
+    const double radius = 1.6;
+    const cv::Vec3d lightDir = normalize3(cv::Vec3d(0.3, 0.8, 0.5));
+
+    const double anglesDeg[] = {-32, -19, -6, 7, 20, 33};
+    const double kPi = 3.141592653589793;
+
+    outFiles.clear();
+    for (int vi = 0; vi < 6; ++vi) {
+        const double phi = anglesDeg[vi] * kPi / 180.0;
+        // 相机中心绕 Y 轴轨道，look-at 原点
+        const cv::Vec3d C(2.8 * std::sin(phi), 0.35, 2.8 * std::cos(phi));
+        cv::Vec3d fwd = normalize3(-C);
+        const cv::Vec3d up(0, 1, 0);
+        cv::Vec3d right = normalize3(fwd.cross(up));
+        cv::Vec3d up2 = normalize3(right.cross(fwd));
+        const cv::Mat R = (cv::Mat_<double>(3, 3) <<
+            right[0], right[1], right[2],
+            up2[0], up2[1], up2[2],
+            fwd[0], fwd[1], fwd[2]);
+        const cv::Mat Cm = (cv::Mat_<double>(3, 1) << C[0], C[1], C[2]);
+        const cv::Mat t = -R * Cm;
+        const cv::Mat Rinv = R.t();
+
+        cv::Mat img(H, W, CV_8UC3, cv::Scalar(205, 205, 205));
+        const double fx = K.at<double>(0, 0), fy = K.at<double>(1, 1);
+        const double cx = K.at<double>(0, 2), cy = K.at<double>(1, 2);
+
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                cv::Vec3d dCam((x - cx) / fx, (y - cy) / fy, 1.0);
+                const cv::Mat dM = Rinv * (cv::Mat_<double>(3, 1)
+                    << dCam[0], dCam[1], dCam[2]);
+                const cv::Vec3d dWorld = normalize3(cv::Vec3d(
+                    dM.at<double>(0), dM.at<double>(1), dM.at<double>(2)));
+
+                const cv::Vec3d oc = C - center;
+                const double b = oc.dot(dWorld);
+                const double c = oc.dot(oc) - radius * radius;
+                const double disc = b * b - c;
+                if (disc < 0) continue;
+                const double s = -b - std::sqrt(disc);
+                if (s <= 0) continue;
+                const cv::Vec3d P = C + s * dWorld;
+                const cv::Vec3d n = (P - center) / radius;
+
+                const double u = 0.5 + std::atan2(n[2], n[0]) / (2 * kPi);
+                const double v = 0.5 - std::asin(std::max(-1.0, std::min(1.0, n[1]))) / kPi;
+                const int tx = std::max(0, std::min(tex.cols - 1, static_cast<int>(u * tex.cols)));
+                const int ty = std::max(0, std::min(tex.rows - 1, static_cast<int>(v * tex.rows)));
+                const auto bgr = tex.at<cv::Vec3b>(ty, tx);
+                const double lam = 0.45 + 0.55 * std::max(0.0, n.dot(lightDir));
+                auto &px = img.at<cv::Vec3b>(y, x);
+                for (int ch = 0; ch < 3; ++ch) {
+                    px[ch] = static_cast<uchar>(std::min(255.0, bgr[ch] * lam));
+                }
+            }
+        }
+
+        const QString path = QStringLiteral("%1/view_%2.png")
+                                 .arg(dir).arg(vi, 2, 10, QLatin1Char('0'));
+        if (!cv::imwrite(path.toStdString(), img)) {
+            qCritical() << "无法写入" << path;
+            return false;
+        }
+        outFiles.push_back(path);
+    }
+    return true;
+}
+
+/// 断言管线结果：稀疏点云/注册相机/密集跳过
+static void checkSparseResult(const ReconstructionOutput &out, const QString &tag)
+{
+    int registered = 0;
+    for (const auto &pose : out.cameraPoses)
+        if (pose.registered) ++registered;
+    check(out.sparseCloud && out.sparseCloud->size() >= 100,
+          QStringLiteral("%1 稀疏点云 ≥100 点 (实际 %2)")
+              .arg(tag)
+              .arg(out.sparseCloud ? static_cast<int>(out.sparseCloud->size()) : 0));
+    check(registered >= 3,
+          QStringLiteral("%1 已注册相机 ≥3 (实际 %2)").arg(tag).arg(registered));
+}
+
+void runReconstructionPipelineSmoke(PluginRegistry &reg)
+{
+    if (!reg.descriptorPlugin("SIFT") || !reg.matcherPlugin("FLANN")) {
+        qWarning().noquote() << "[WARN] SIFT/FLANN 插件缺失，跳过重建管线冒烟";
+        check(true, "重建管线冒烟：插件缺失，跳过(计 PASS)");
+        return;
+    }
+
+    const QString workDir = QDir::temp().filePath(
+        QStringLiteral("sfm3_smoke_%1").arg(QCoreApplication::applicationPid()));
+    QDir().mkpath(workDir);
+
+    QStringList files;
+    if (!renderSphereViews(workDir, files) || files.size() < 4) {
+        check(false, "重建管线冒烟：合成多视图渲染失败");
+        return;
+    }
+    check(files.size() == 6, QStringLiteral("重建管线冒烟：渲染 %1 张视图").arg(files.size()));
+
+    ReconstructionConfig cfg;
+    cfg.imageFiles = files;
+    cfg.projectPath = workDir;
+    cfg.descriptorType = "SIFT";
+    cfg.matcherType = "FLANN";
+    cfg.threadCount = 2;
+    // 未实现的密集方法：走"未找到方法，跳过"分支，避免阻塞等待 UI 选择
+    cfg.denseReconstructionMethod = "P4NotImplemented";
+
+    // ── 直接路径：ReconstructionPipeline::execute（同步） ──
+    {
+        ReconstructionPipeline pipeline;
+        PipelineCapture cap;
+        pipeline.setCallbacks(&cap);
+        pipeline.setConfig(cfg);
+
+        ReconstructionOutput out;
+        try {
+            out = pipeline.execute();
+        } catch (const std::exception &e) {
+            check(false, QStringLiteral("管线直接路径抛出异常: %1").arg(e.what()));
+        } catch (...) {
+            check(false, "管线直接路径抛出未知异常");
+        }
+
+        // 转储管线日志（SfmLogger 处理器会吞掉 qInfo/qCritical，无法直接看到）
+        for (const auto &l : cap.logs)
+            std::fprintf(stderr, "[pipe] %s\n", l.toLocal8Bit().constData());
+
+        checkSparseResult(out, "管线直接路径");
+        check(cap.logs.join(QStringLiteral("\n")).contains("跳过密集重建"),
+              "密集重建未实现方法被安全跳过(直接路径)");
+        check(cap.cloudEvents >= 1, "接收阶段点云事件(sparse,直接路径)");
+    }
+
+    // ── 线程路径：PipelineRunner（QThread + 信号转发） ──
+    {
+        ReconstructionPipeline pipeline;
+        PipelineCapture cap;
+        pipeline.setCallbacks(&cap);
+        pipeline.setConfig(cfg);
+
+        PipelineRunner runner(&pipeline);
+        runner.setAutoSaveDirectory(workDir);
+
+        bool ok = false;
+        int runnerClouds = 0;
+        QEventLoop loop;
+        QObject::connect(&runner, &PipelineRunner::finished,
+                         [&](bool success) { ok = success; loop.quit(); });
+        QObject::connect(&runner, &PipelineRunner::stagePointCloudReady,
+                         [&](const QVector<float> &, const QVector<float> &,
+                             const QString &) { ++runnerClouds; });
+        try {
+            runner.start();
+            loop.exec();
+            runner.waitForFinished();
+        } catch (const std::exception &e) {
+            check(false, QStringLiteral("Runner 路径抛出异常: %1").arg(e.what()));
+        } catch (...) {
+            check(false, "Runner 路径抛出未知异常");
+        }
+
+        check(ok, "PipelineRunner 完整重建 finished(success)");
+        for (const auto &l : cap.logs)
+            std::fprintf(stderr, "[pipe] %s\n", l.toLocal8Bit().constData());
+        checkSparseResult(pipeline.lastOutput(), "Runner 路径");
+        check(runnerClouds >= 1,
+              QStringLiteral("接收阶段点云事件(sparse,Runner路径,次数=%1)").arg(runnerClouds));
+        runner.stop();
+    }
+
+    // 清理临时影像
+    for (const auto &f : files)
+        QFile::remove(f);
+    QDir().rmdir(workDir);
+}
+
 int run(const QString &pluginsDir)
 {
     auto &reg = PluginRegistry::instance();
@@ -633,6 +866,9 @@ int run(const QString &pluginsDir)
     runSfmLoggerTests();
     runInitializationTests();
     runMatcherServiceSmoke(reg);
+
+    // ── P3b 重建管线冒烟 ──
+    runReconstructionPipelineSmoke(reg);
 
     return failures > 0 ? 1 : 0;
 }
