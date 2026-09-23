@@ -1,0 +1,16 @@
+{
+  "name": "SampleDescriptor",
+  "category": "descriptor",
+  "version": "1.0.0",
+  "description": "P1 sample deterministic descriptor plugin (dummy deterministic output)",
+  "params": [
+    {
+      "name": "scale",
+      "type": "double",
+      "default": 1.0,
+      "min": 0.1,
+      "max": 10.0,
+      "group": "示例"
+    }
+  ]
+}

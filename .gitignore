@@ -1,0 +1,32 @@
+# 构建产物
+build/
+
+# Qt Creator
+*.user
+.qtcreator/
+
+# 编译生成物与临时文件
+*.obj
+*.o
+*.dll
+*.lib
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.log
+Makefile
+Makefile.*
+.qmake.stash
+.qmake.cache
+
+# 调试残留
+.dbg/
+
+# 通用
+.vs/
+.vscode/
+Thumbs.db
+
+# 关键文件不允许误忽略
+!src/plugins/**/plugin.json
