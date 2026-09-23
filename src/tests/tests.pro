@@ -2,4 +2,5 @@
 TEMPLATE = subdirs
 
 SUBDIRS = \
-    plugin_test
+    plugin_test \
+    ui_test
