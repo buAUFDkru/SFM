@@ -709,6 +709,28 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
                 std::fprintf(stderr, "[pipe2] %s\n", l.toLocal8Bit().constData());
         }
 
+        // ── 密集重建（P5: PatchMatch 完整运行，复用稀疏中间状态） ──
+        {
+            // 快速参数：缩小工作图像、减少迭代与窗口，保证测试时长可控
+            const QMap<QString, QVariant> pmParams{
+                {"maxImageSize", 320},
+                {"windowRadius", 3},
+                {"numSamples", 5},
+                {"numIterations", 2},
+                {"filterMinNcc", 0.25},
+                {"filter", false},
+            };
+            pipeline.setDenseReconstructionMethod("PatchMatch", pmParams);
+            const bool pmOk = pipeline.executeDenseReconstruction();
+            const auto &pmOut = pipeline.lastOutput();
+            check(pmOk && pmOut.denseCloud && pmOut.denseCloud->size() > 0,
+                  QStringLiteral("PatchMatch 密集重建成功 (密集点云 %1 点)")
+                      .arg(pmOut.denseCloud
+                               ? static_cast<int>(pmOut.denseCloud->size()) : 0));
+            for (const auto &l : cap.logs)
+                std::fprintf(stderr, "[pipe3] %s\n", l.toLocal8Bit().constData());
+        }
+
         // 工厂注册冒烟（PatchMatch 完整运行耗时长，此处仅验证注册与接口）
         {
             auto pmatcher = DenseReconstructionFactory::instance().create("PatchMatch");
