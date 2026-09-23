@@ -30,6 +30,8 @@
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
 #include "plugin/PluginRegistry.h"
+#include "pipeline/DenseReconstructionFactory.h"
+#include "pipeline/IDenseReconstructor.h"
 #include "pipeline/ReconstructionPipeline.h"
 #include "pipeline/PipelineRunner.h"
 
@@ -666,6 +668,11 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
         pipeline.setCallbacks(&cap);
         pipeline.setConfig(cfg);
 
+        std::fprintf(stderr, "[dbg] dense methods after ctor: %s\n",
+                     DenseReconstructionFactory::instance()
+                         .availableMethods().join(QStringLiteral(","))
+                         .toLocal8Bit().constData());
+
         ReconstructionOutput out;
         try {
             out = pipeline.execute();
@@ -683,6 +690,35 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
         check(cap.logs.join(QStringLiteral("\n")).contains("跳过密集重建"),
               "密集重建未实现方法被安全跳过(直接路径)");
         check(cap.cloudEvents >= 1, "接收阶段点云事件(sparse,直接路径)");
+
+        // ── 密集重建（P4a: StereoSGBM，复用稀疏中间状态） ──
+        {
+            const QMap<QString, QVariant> denseParams{
+                {"useWLSFilter", false}, {"numDisparities", 64},
+                {"blockSize", 5}, {"useHHMode", false},
+                {"minDisparity", 0}, {"maxDepth", 50.0},
+            };
+            pipeline.setDenseReconstructionMethod("StereoSGBM", denseParams);
+            const bool denseOk = pipeline.executeDenseReconstruction();
+            const auto &dOut = pipeline.lastOutput();
+            check(denseOk && dOut.denseCloud && dOut.denseCloud->size() > 0,
+                  QStringLiteral("StereoSGBM 密集重建成功 (密集点云 %1 点)")
+                      .arg(dOut.denseCloud
+                               ? static_cast<int>(dOut.denseCloud->size()) : 0));
+            for (const auto &l : cap.logs)
+                std::fprintf(stderr, "[pipe2] %s\n", l.toLocal8Bit().constData());
+        }
+
+        // 工厂注册冒烟（PatchMatch 完整运行耗时长，此处仅验证注册与接口）
+        {
+            auto pmatcher = DenseReconstructionFactory::instance().create("PatchMatch");
+            check(pmatcher != nullptr && pmatcher->methodName() == "PatchMatch",
+                  "PatchMatch 已注册到 DenseReconstructionFactory");
+            check(DenseReconstructionFactory::instance()
+                          .availableMethods()
+                          .contains("StereoSGBM"),
+                  "StereoSGBM 已注册到 DenseReconstructionFactory");
+        }
     }
 
     // ── 线程路径：PipelineRunner（QThread + 信号转发） ──
