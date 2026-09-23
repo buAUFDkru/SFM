@@ -56,6 +56,8 @@ equals(SFM3_ALG_DEPS, 1) {
             LIBS += -l$$CERES_ROOT/glogLib/lib/glog
         }
         LIBS += -L$$OPEN3D_ROOT/lib -lOpen3D
+        # 注：Open3D.dll 的部署交由 tools/ 部署脚本或运行时 PATH（$$OPEN3D_ROOT/bin）
+        # 完成；不在此处 QMAKE_POST_LINK 拷贝（大文件首次落盘易被安全软件锁死导致退出码1）。
     }
 }
 
