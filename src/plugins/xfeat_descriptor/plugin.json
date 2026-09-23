@@ -1,0 +1,11 @@
+{
+  "name": "XFeat",
+  "category": "descriptor",
+  "version": "1.0.0",
+  "description": "基于卷积神经网络的 XFeat 关键点检测与描述子提取(ONNX Runtime 推理)",
+  "params": [
+    { "name": "scoreThreshold", "type": "double", "default": 0.05, "min": 0.001, "max": 0.5, "group": "XFeat", "tooltip": "关键点得分阈值" },
+    { "name": "nmsKernelSize", "type": "int", "default": 5, "min": 3, "max": 9, "group": "XFeat", "tooltip": "NMS 窗口大小，应为奇数" },
+    { "name": "maxFeatures", "type": "int", "default": 8192, "min": 0, "group": "XFeat", "tooltip": "最大特征点数量，0 表示不限制" }
+  ]
+}

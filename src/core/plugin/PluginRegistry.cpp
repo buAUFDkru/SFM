@@ -36,6 +36,13 @@ int PluginRegistry::scanPlugins(const QString &dir)
         const QString path = d.absoluteFilePath(fileName);
         auto *loader = new QPluginLoader(path, this);
 
+        // 元数据预检：非 Qt 插件（如拷入的运行时 DLL）直接跳过，避免加载报错噪音
+        if (loader->metaData().isEmpty()) {
+            qDebug() << "[PluginRegistry] 跳过非 Qt 插件:" << path;
+            delete loader;
+            continue;
+        }
+
         if (!loader->load()) {
             qWarning() << "[PluginRegistry] 加载失败:" << path << loader->errorString();
             loader->deleteLater();
