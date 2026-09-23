@@ -27,18 +27,6 @@ FlannMatcherWorker::FlannMatcherWorker(const QJsonObject &params)
         m_checks = params.value(QStringLiteral("checks")).toInt(50);
 }
 
-cv::Ptr<cv::FlannBasedMatcher> makeFlannMatcher(int trees, int descType)
-{
-    if (descType == CV_8U) {
-        // 二进制描述符（ORB 等）→ LSH 索引
-        return cv::makePtr<cv::FlannBasedMatcher>(
-            cv::makePtr<cv::flann::LshIndexParams>(20, 10, 2));
-    }
-    // 浮点描述符（SIFT/SURF 等）→ KD 树索引
-    return cv::makePtr<cv::FlannBasedMatcher>(
-        cv::makePtr<cv::flann::KDTreeIndexParams>(trees));
-}
-
 bool FlannMatcherWorker::knnMatchPair(const cv::Mat &desc1, const cv::Mat &desc2,
                                       std::vector<std::vector<cv::DMatch>> &outKnnMatches,
                                       int k)
