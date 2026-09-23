@@ -1,0 +1,93 @@
+/* style.qss —— SFM Reconstructor 全局样式 */
+QMainWindow, QDialog {
+    background-color: #2b2b2b;
+    color: #e0e0e0;
+}
+
+QMenuBar, QMenu {
+    background-color: #333333;
+    color: #e0e0e0;
+}
+
+QMenuBar::item:selected, QMenu::item:selected {
+    background-color: #4a90d9;
+    color: white;
+}
+
+QSplitter::handle {
+    background-color: #3a3a3a;
+}
+
+QGroupBox {
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 6px;
+    font-weight: bold;
+    color: #9cdcfe;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+}
+
+QLabel {
+    color: #e0e0e0;
+}
+
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #3c3f41;
+    color: #e0e0e0;
+    border: 1px solid #5a5a5a;
+    border-radius: 3px;
+    padding: 3px 6px;
+}
+
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border-color: #4a90d9;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #3c3f41;
+    color: #e0e0e0;
+    selection-background-color: #4a90d9;
+}
+
+QCheckBox {
+    color: #e0e0e0;
+    spacing: 6px;
+}
+
+QToolButton, QPushButton {
+    background-color: #4a4a4a;
+    color: #e0e0e0;
+    border: 1px solid #5a5a5a;
+    border-radius: 3px;
+    padding: 4px 8px;
+}
+
+QToolButton:hover, QPushButton:hover {
+    background-color: #5a5a5a;
+}
+
+QScrollBar:vertical {
+    background: #2b2b2b;
+    width: 10px;
+}
+
+QScrollBar::handle:vertical {
+    background: #5a5a5a;
+    border-radius: 4px;
+    min-height: 24px;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QStatusBar {
+    background-color: #333333;
+    color: #e0e0e0;
+}
