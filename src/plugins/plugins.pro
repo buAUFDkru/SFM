@@ -5,5 +5,7 @@ SUBDIRS = \
     sample_descriptor \
     sift_descriptor \
     kaze_descriptor \
+    surf_descriptor \
+    xfeat_descriptor \
     flann_matcher \
     bruteforce_matcher

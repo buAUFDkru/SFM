@@ -1,0 +1,14 @@
+{
+  "name": "SURF",
+  "category": "descriptor",
+  "version": "1.0.0",
+  "description": "基于加速稳健特征(SURF)的关键点检测与描述子提取",
+  "params": [
+    { "name": "hessianThreshold", "type": "double", "default": 100.0, "min": 1.0, "max": 100000.0, "group": "SURF", "tooltip": "Hessian 响应阈值，越大提取的点越少" },
+    { "name": "nOctaves", "type": "int", "default": 4, "min": 1, "max": 16, "group": "SURF" },
+    { "name": "nOctaveLayers", "type": "int", "default": 3, "min": 1, "max": 16, "group": "SURF" },
+    { "name": "extended", "type": "bool", "default": false, "group": "SURF", "tooltip": "是否使用扩展(128维)描述子" },
+    { "name": "upright", "type": "bool", "default": false, "group": "SURF", "tooltip": "是否使用无旋转 Upright 描述子" },
+    { "name": "maxFeatures", "type": "int", "default": 0, "min": 0, "group": "SURF", "tooltip": "最大特征点数量，0 表示不限制" }
+  ]
+}

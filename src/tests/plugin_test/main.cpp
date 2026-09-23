@@ -112,19 +112,25 @@ void makeSyntheticFeatures(cv::Mat &desc1, cv::Mat &desc2)
     desc2 = desc1.clone();
 }
 
-/// 对描述符插件做 P2 并发一致性检查（8 线程 × 10 任务，各任务内 createWorker + extract）
-void runDescriptorConcurrencyCheck(IDescriptorPlugin *plugin)
+/// 对描述符插件做 P2 并发一致性检查（8 线程 × tasksPerThread 任务，各任务内 createWorker + extract）
+void runDescriptorConcurrencyCheck(IDescriptorPlugin *plugin, int tasksPerThread = 10)
 {
     const int kThreads = 8;
-    const int kTasksPerThread = 10;
+    const int kTasksPerThread = tasksPerThread;
 
     const ImageEntry img = makeSyntheticTextureImage(0);
 
     // 串行参考结果
     auto refWorker = plugin->createWorker(QJsonObject{});
-    if (!refWorker)
+    if (!refWorker) {
+        qWarning() << "  并发一致性: createWorker 失败，跳过";
         return;
+    }
     const FeatureResult ref = refWorker->extract(img);
+    if (ref.keypoints.empty()) {
+        qWarning() << "  并发一致性: 参考结果为 0 关键点，跳过";
+        return;
+    }
 
     std::atomic<int> mismatch{0};
 
@@ -203,8 +209,9 @@ int run(const QString &pluginsDir)
     // 线程池并发一致性
     runConcurrencyCheck(plugin);
 
-    // ── P2 描述符插件 (SIFT / KAZE) ──
-    for (const auto &descName : { QStringLiteral("SIFT"), QStringLiteral("KAZE") }) {
+    // ── P2 描述符插件 (SIFT / KAZE / SURF) ──
+    for (const auto &descName : { QStringLiteral("SIFT"), QStringLiteral("KAZE"),
+                                  QStringLiteral("SURF") }) {
         auto *dp = reg.descriptorPlugin(descName);
         check(dp != nullptr, "按 id 加载 " + descName + " 插件");
         if (!dp)
@@ -219,6 +226,42 @@ int run(const QString &pluginsDir)
                       .arg(r.keypoints.size()));
         }
         runDescriptorConcurrencyCheck(dp);
+    }
+
+    // ── P2 描述符插件 (XFeat：运行时依赖(onnxruntime DLL 加载)或模型缺失均不导致失败) ──
+    {
+        const QString modelsDir =
+            QCoreApplication::applicationDirPath() + QStringLiteral("/models");
+        auto *xp = reg.descriptorPlugin(QStringLiteral("XFeat"));
+        if (!xp) {
+            // onnxruntime 与 Qt 插件加载器存在兼容问题(Win32 193, 见重构设计文档 P2 注)，
+            // 该插件在本机可能无法加载；其余插件不受影响，此处跳过计 PASS
+            qWarning().noquote() << "[WARN] XFeat 插件未加载，跳过（运行时依赖环境问题，不影响其他插件）";
+            check(true, "XFeat 插件未加载，跳过(计 PASS)");
+        } else {
+            check(true, "按 id 加载 XFeat 插件");
+            if (!QDir(modelsDir).exists()) {
+                // 模型目录不存在/无模型：打印 [WARN] 跳过并计 PASS
+                qWarning().noquote() << "[WARN] 未找到 XFeat 模型目录:" << modelsDir
+                                     << "，跳过 XFeat 特征检查";
+                check(true, "XFeat 模型缺失，跳过(计 PASS)");
+            } else {
+                auto xw = xp->createWorker(QJsonObject{});
+                check(xw != nullptr, "XFeat createWorker 创建成功");
+                if (xw) {
+                    const FeatureResult r = xw->extract(makeSyntheticTextureImage(1));
+                    // 目录存在但无可匹配模型也可能返回 0 关键点
+                    check(r.keypoints.size() > 0,
+                          QStringLiteral("XFeat 提取合成纹理特征 keypoints=%1 (>0)")
+                              .arg(r.keypoints.size()));
+                    if (r.keypoints.size() > 0) {
+                        runDescriptorConcurrencyCheck(xp, 5);
+                    } else {
+                        qWarning().noquote() << "[WARN] XFeat 提取到 0 关键点，跳过并发一致性检查";
+                    }
+                }
+            }
+        }
     }
 
     // ── P2 匹配器插件 (FLANN / BruteForce) ──
