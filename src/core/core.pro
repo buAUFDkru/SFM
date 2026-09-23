@@ -19,10 +19,12 @@ HEADERS += \
     data/SfmTypes.h \
     algorithm/ThreadPool.h \
     algorithm/SfmLogger.h \
-    algorithm/Initialization.h
+    algorithm/Initialization.h \
+    algorithm/MatcherService.h
 
 SOURCES += \
     plugin/PluginRegistry.cpp \
     algorithm/ThreadPool.cpp \
     algorithm/SfmLogger.cpp \
-    algorithm/Initialization.cpp
+    algorithm/Initialization.cpp \
+    algorithm/MatcherService.cpp
