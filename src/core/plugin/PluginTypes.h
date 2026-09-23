@@ -34,6 +34,7 @@ struct FeatureResult
     int imageHeight = 0;
     std::vector<cv::KeyPoint> keypoints;
     cv::Mat descriptors;
+    cv::Mat imageData;   ///< 原始BGR图像数据（用于 PnP/三角化阶段点云着色）
     double elapsedMs = 0.0;
 };
 
