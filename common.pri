@@ -4,11 +4,12 @@
 
 # ── 第三方根目录（环境变量优先，回退默认安装路径） ──
 isEmpty(OPENCV_DIR): OPENCV_DIR = "D:/package/C++Package/opencv460/build/install"
+isEmpty(ONNXRUNTIME_DIR): ONNXRUNTIME_DIR = "D:/package/C++Package/onnxruntime-win-x64-1.26.0"
 
 CONFIG += c++17
 DEFINES += NOMINMAX WIN32_LEAN_AND_MEAN
 
-# ── OpenCV ──
+# ── OpenCV（world 构建，含 contrib 的 xfeatures2d 等模块符号） ──
 INCLUDEPATH += $$OPENCV_DIR/include
 
 win32 {
@@ -18,3 +19,7 @@ win32 {
         LIBS += -L$$OPENCV_DIR/lib -lopencv_world460d
     }
 }
+
+# ── ONNX Runtime（XFeat 推理） ──
+INCLUDEPATH += $$ONNXRUNTIME_DIR/include
+LIBS += -L$$ONNXRUNTIME_DIR/lib -lonnxruntime
