@@ -1,6 +1,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QJsonObject>
 #include <QLoggingCategory>
 #include <QMessageLogContext>
 
@@ -8,11 +9,19 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <future>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
+#include "algorithm/Initialization.h"
+#include "algorithm/MatcherService.h"
+#include "algorithm/SfmLogger.h"
+#include "algorithm/ThreadPool.h"
 #include "plugin/IDescriptorPlugin.h"
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
@@ -167,6 +176,325 @@ void runDescriptorConcurrencyCheck(IDescriptorPlugin *plugin, int tasksPerThread
                                       : QStringLiteral(" — 不一致 %1 处").arg(mismatch.load())));
 }
 
+// ── P3a 共享算法单元测试 ────────────────────────────────────────────────────
+
+void runThreadPoolTests()
+{
+    // 默认配置线程数在 [1,2]（make_cpu_pool_options 上限 2）
+    {
+        const auto opts = sfm::make_cpu_pool_options();
+        check(opts.thread_count >= 1 && opts.thread_count <= 2,
+              QStringLiteral("ThreadPool 默认线程数 [1,2] → %1").arg(opts.thread_count));
+    }
+
+    // submit 收集 0..99 求和 = 4950
+    {
+        sfm::ThreadPool pool(sfm::make_cpu_pool_options(2));
+        std::vector<std::future<int>> futures;
+        futures.reserve(100);
+        for (int i = 0; i < 100; ++i) {
+            futures.push_back(pool.submit([i] { return i; }));
+        }
+        long long sum = 0;
+        for (auto &f : futures)
+            sum += f.get();
+        check(sum == 4950, QStringLiteral("ThreadPool submit 100 任务求和=%1").arg(sum));
+    }
+
+    // detach + wait_for_idle：全部任务完成
+    {
+        sfm::ThreadPool pool(sfm::make_cpu_pool_options(2));
+        std::atomic<int> counter{0};
+        for (int i = 0; i < 200; ++i) {
+            const bool ok = pool.detach([&counter] { counter.fetch_add(1); });
+            check(ok, "ThreadPool detach 入队成功");
+            if (!ok)
+                break;
+        }
+        pool.wait_for_idle();
+        check(counter.load() == 200,
+              QStringLiteral("ThreadPool wait_for_idle 后计数=%1").arg(counter.load()));
+    }
+
+    // shutdown 后 submit 抛异常
+    {
+        sfm::ThreadPool pool(sfm::make_cpu_pool_options(2));
+        pool.shutdown();
+        bool threw = false;
+        try {
+            pool.submit([] { return 1; });
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "ThreadPool shutdown 后 submit 抛 runtime_error");
+        check(!pool.is_running(), "ThreadPool shutdown 后 is_running()==false");
+    }
+}
+
+void runSfmLoggerTests()
+{
+    // 回调接收 + 清空后不再接收
+    QStringList received;
+    auto makeCapture = [&received](QStringList &out) {
+        return SfmLogger::LogCallback([&out](const QString &msg) { out.push_back(msg); });
+    };
+    SfmLogger &logger = SfmLogger::instance();
+    logger.setDefaultCallback(makeCapture(received));
+    received.clear();
+    logger.log(QStringLiteral("hello-logger"));
+    check(received.size() == 1 && received[0].contains("hello-logger"),
+          QStringLiteral("SfmLogger 回调收到 %1 条日志").arg(received.size()));
+
+    // 全局消息处理：安装后 qWarning 被捕获，卸载后恢复
+    QStringList captured;
+    logger.clearCallbacks();
+    logger.addCallback(makeCapture(captured));
+    logger.installAsMessageHandler();
+    qWarning("captured-by-sfmlogger");
+    logger.uninstallAsMessageHandler();
+    bool got = false;
+    for (const auto &s : captured)
+        if (s.contains("captured-by-sfmlogger"))
+            got = true;
+    check(got, "SfmLogger installAsMessageHandler 捕获 qWarning");
+    logger.clearCallbacks();
+}
+
+/// 构造两视图对应点：由 3D 场景经 [I|0] 与 [R|t] 投影，加高斯噪声
+void makeTwoViewPoints(const std::vector<cv::Point3d> &world,
+                       const cv::Mat &R, const cv::Mat &t, const cv::Mat &K,
+                       double noiseSigma, cv::RNG &rng,
+                       std::vector<cv::Point2d> &pts1,
+                       std::vector<cv::Point2d> &pts2)
+{
+    pts1.clear();
+    pts2.clear();
+    pts1.reserve(world.size());
+    pts2.reserve(world.size());
+    for (const auto &X : world) {
+        // 相机2 = R * X + t
+        const cv::Mat Rc = K * (R * (cv::Mat_<double>(3, 1) << X.x, X.y, X.z) + t);
+
+        const cv::Mat p1 = K * (cv::Mat_<double>(3, 1) << X.x, X.y, X.z);
+        double u1 = p1.at<double>(0, 0) / p1.at<double>(2, 0);
+        double v1 = p1.at<double>(1, 0) / p1.at<double>(2, 0);
+        double u2 = Rc.at<double>(0, 0) / Rc.at<double>(2, 0);
+        double v2 = Rc.at<double>(1, 0) / Rc.at<double>(2, 0);
+
+        if (p1.at<double>(2, 0) <= 0 || Rc.at<double>(2, 0) <= 0)
+            continue;
+        pts1.push_back({u1 + rng.gaussian(noiseSigma), v1 + rng.gaussian(noiseSigma)});
+        pts2.push_back({u2 + rng.gaussian(noiseSigma), v2 + rng.gaussian(noiseSigma)});
+    }
+}
+
+void runInitializationTests()
+{
+    Initialization *init = Initialization::instance();
+    const cv::Mat K = estimateK(640, 480);
+    cv::RNG rng(20260923);
+
+    // 场景 A：一般 3D 场景 → 应选 F 模型
+    {
+        std::vector<cv::Point3d> world;
+        world.reserve(240);
+        cv::RNG grng(11);
+        for (int i = 0; i < 240; ++i) {
+            world.push_back({grng.uniform(-2.0, 2.0),
+                             grng.uniform(-2.0, 2.0),
+                             grng.uniform(4.0, 8.0)});
+        }
+        cv::Mat rvecA = (cv::Mat_<double>(3, 1) << 0.0, 0.14, 0.0); // ~8° Y 旋转
+        cv::Mat R;
+        cv::Rodrigues(rvecA, R);
+        const cv::Mat t = (cv::Mat_<double>(3, 1) << 0.45, 0.10, -0.05);
+
+        std::vector<cv::Point2d> pts1, pts2;
+        makeTwoViewPoints(world, R, t, K, 0.35, rng, pts1, pts2);
+
+        cv::Mat F, H;
+        std::vector<uchar> inliers;
+        const int model = init->selectModel(pts1, pts2, F, H, inliers, 1.0, 2.0);
+        const int inlierCount =
+            static_cast<int>(std::count(inliers.begin(), inliers.end(), 1));
+        check(model == 0, QStringLiteral("GRIC 一般3D场景选 F 模型 (model=%1)").arg(model));
+        check(inlierCount > static_cast<int>(pts1.size()) * 0.6,
+              QStringLiteral("F 内点率 >=60% (inliers=%1/%2)")
+                  .arg(inlierCount).arg(pts1.size()));
+    }
+
+    // 场景 B：平面场景(z≈1 严格平面) → 应选 H 模型
+    {
+        std::vector<cv::Point3d> world;
+        world.reserve(240);
+        cv::RNG grng(22);
+        for (int i = 0; i < 240; ++i) {
+            world.push_back({grng.uniform(-3.0, 3.0),
+                             grng.uniform(-3.0, 3.0),
+                             1.0});
+        }
+        cv::Mat rvecB = (cv::Mat_<double>(3, 1) << 0.0, 0.10, 0.06);
+        cv::Mat R;
+        cv::Rodrigues(rvecB, R);
+        const cv::Mat t = (cv::Mat_<double>(3, 1) << 0.30, 0.08, -0.03);
+
+        std::vector<cv::Point2d> pts1, pts2;
+        makeTwoViewPoints(world, R, t, K, 0.25, rng, pts1, pts2);
+
+        cv::Mat F, H;
+        std::vector<uchar> inliers;
+        const int model = init->selectModel(pts1, pts2, F, H, inliers, 1.0, 2.0);
+        const int inlierCount =
+            static_cast<int>(std::count(inliers.begin(), inliers.end(), 1));
+        check(model == 1, QStringLiteral("GRIC 平面场景选 H 模型 (model=%1)").arg(model));
+        check(inlierCount > static_cast<int>(pts1.size()) * 0.6,
+              QStringLiteral("H 内点率 >=60% (inliers=%1/%2)")
+                  .arg(inlierCount).arg(pts1.size()));
+    }
+
+    // recoverPoseFromH：平面场景(相机前方)恢复位姿成功
+    {
+        std::vector<cv::Point3d> world;
+        world.reserve(120);
+        cv::RNG grng(33);
+        for (int i = 0; i < 120; ++i) {
+            world.push_back({grng.uniform(-2.0, 2.0),
+                             grng.uniform(-2.0, 2.0),
+                             1.0});
+        }
+        cv::Mat rvecC = (cv::Mat_<double>(3, 1) << 0.02, 0.09, 0.03);
+        cv::Mat R;
+        cv::Rodrigues(rvecC, R);
+        const cv::Mat t = (cv::Mat_<double>(3, 1) << 0.25, 0.05, -0.02);
+
+        std::vector<cv::Point2d> pts1, pts2;
+        makeTwoViewPoints(world, R, t, K, 0.2, rng, pts1, pts2);
+
+        const cv::Mat H = cv::findHomography(pts1, pts2, cv::RANSAC, 2.0);
+        cv::Mat Rr, tr;
+        const bool ok = init->recoverPoseFromH(pts1, pts2, K, H, Rr, tr);
+        check(ok && cv::norm(tr) > 1e-6,
+              QStringLiteral("recoverPoseFromH 成功 (t=%1,%2,%3)")
+                  .arg(tr.at<double>(0, 0), 0, 'f', 3)
+                  .arg(tr.at<double>(1, 0), 0, 'f', 3)
+                  .arg(tr.at<double>(2, 0), 0, 'f', 3));
+    }
+
+    // estimateK / pixel2cam 数值断言
+    {
+        const cv::Mat Kk = estimateK(640, 480);
+        const double expectFx = 480.0 * 0.5 / (3.141592653589793 / 6.0);
+        check(std::abs(Kk.at<double>(0, 0) - expectFx) < 1e-9 &&
+                  Kk.at<double>(0, 2) == 320.0 && Kk.at<double>(1, 2) == 240.0,
+              "estimateK(640x480) 数值正确");
+        const cv::Point2d n = pixel2cam({Kk.at<double>(0, 2), Kk.at<double>(1, 2)}, Kk);
+        check(std::abs(n.x) < 1e-12 && std::abs(n.y) < 1e-12,
+              "pixel2cam 主点映射到归一化原点");
+    }
+}
+
+/// 构造带纹理平面图像序列（近平面 → H 模型主导的匹配）
+ImageEntry makeWarpedTexture(int id, const cv::Mat &base, double dx, double dy, double angleDeg)
+{
+    const int rows = base.rows, cols = base.cols;
+    cv::Mat m = cv::getRotationMatrix2D(cv::Point2f(cols / 2.f, rows / 2.f), angleDeg, 1.0);
+    m.at<double>(0, 2) += dx;
+    m.at<double>(1, 2) += dy;
+
+    cv::Mat warped;
+    cv::warpAffine(base, warped, m, base.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT);
+
+    ImageEntry img;
+    img.id = id;
+    img.imageGray = warped.clone();
+    img.imageData = warped.clone();
+    return img;
+}
+
+void runMatcherServiceSmoke(PluginRegistry &reg)
+{
+    IDescriptorPlugin *desc = reg.descriptorPlugin("SIFT");
+    IMatcherPlugin *matchPlugin = reg.matcherPlugin("FLANN");
+    if (!desc || !matchPlugin) {
+        qWarning().noquote() << "[WARN] SIFT/FLANN 插件缺失，跳过 MatcherService 冒烟测试";
+        check(true, "MatcherService 冒烟：插件缺失，跳过(计 PASS)");
+        return;
+    }
+
+    // 1. 合成三视图：底图 + 平移 + 微旋
+    cv::Mat base(240, 320, CV_8UC1);
+    {
+        cv::RNG rng(4242);
+        rng.fill(base, cv::RNG::UNIFORM, 0, 255);
+    }
+    const auto img0 = makeWarpedTexture(0, base, 0.0, 0.0, 0.0);
+    const auto img1 = makeWarpedTexture(1, base, 6.0, 4.0, 0.0);
+    const auto img2 = makeWarpedTexture(2, base, 2.0, -3.0, 2.5);
+
+    // 2. SIFT 提取特征
+    auto dw = desc->createWorker(QJsonObject{});
+    if (!dw) {
+        check(false, "MatcherService 冒烟：SIFT createWorker 失败");
+        return;
+    }
+    std::vector<FeatureResult> features;
+    for (const auto &img : {img0, img1, img2}) {
+        FeatureResult fr = dw->extract(img);
+        fr.imageWidth = img.imageGray.cols;
+        fr.imageHeight = img.imageGray.rows;
+        features.push_back(std::move(fr));
+    }
+    for (const auto &fr : features) {
+        check(fr.keypoints.size() > 100,
+              QStringLiteral("MatcherService 冒烟：SIFT 提取 keypoints=%1 (>100)")
+                  .arg(fr.keypoints.size()));
+    }
+
+    MatcherService service(&reg);
+    const QJsonObject mparams{
+        {"ratioThreshold", 0.8}, {"ransacThreshold", 2.0},
+        {"minMatchCount", 20}, {"minMatchRatio", 0.05},
+    };
+
+    // 3. 串行编排匹配
+    std::vector<MatchPair> pairs;
+    const bool ok = service.matchFeatures(features, "FLANN", mparams, pairs);
+    check(ok && !pairs.empty(),
+          QStringLiteral("MatcherService 串行编排产出 %1 对有效匹配").arg(pairs.size()));
+    for (const auto &mp : pairs) {
+        check(mp.matchCount >= 8 && !mp.F.empty() && !mp.H.empty(),
+              QStringLiteral("MatchPair #%1↔#%2 验证内点=%3, F/H 有效")
+                  .arg(mp.imageId1).arg(mp.imageId2).arg(mp.matchCount));
+    }
+
+    // 4. 并行编排路径（线程池，逐任务独占 Worker）
+    std::vector<MatchPair> pairsPar;
+    {
+        sfm::ThreadPool pool(sfm::make_cpu_pool_options(2));
+        const bool okPar = service.matchFeatures(features, "FLANN", mparams, pairsPar,
+                                                 &pool);
+        check(okPar == ok,
+              QStringLiteral("MatcherService 并行编排结果一致 (pairs=%1)")
+                  .arg(pairsPar.size()));
+    }
+
+    // 5. estimateKFromFeatures
+    {
+        const cv::Mat Kk = service.estimateKFromFeatures(features);
+        const double expectFx = 240.0 * 0.5 / (3.141592653589793 / 6.0);
+        check(Kk.at<double>(0, 2) == 160.0 && std::abs(Kk.at<double>(0, 0) - expectFx) < 1e-6,
+              "MatcherService estimateKFromFeatures 数值正确");
+    }
+
+    // 6. 视图图构建
+    {
+        const ViewGraph graph = ViewGraph::buildFromPairs(pairs, 3);
+        check(graph.numNodes == 3 && !graph.edges.empty() &&
+                  graph.edgeWeight(pairs.front().imageId1, pairs.front().imageId2) > 0,
+              QStringLiteral("ViewGraph 构建成功 (edges=%1)").arg(graph.edges.size()));
+    }
+}
+
 int run(const QString &pluginsDir)
 {
     auto &reg = PluginRegistry::instance();
@@ -299,6 +627,12 @@ int run(const QString &pluginsDir)
                       .arg(matches.size()));
         }
     }
+
+    // ── P3a 共享算法单测 ──
+    runThreadPoolTests();
+    runSfmLoggerTests();
+    runInitializationTests();
+    runMatcherServiceSmoke(reg);
 
     return failures > 0 ? 1 : 0;
 }
