@@ -2,11 +2,40 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QFileInfo>
 #include <QSet>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 #include "IDescriptorPlugin.h"
 #include "IMatcherPlugin.h"
 #include "ISfmPlugin.h"
+
+namespace {
+
+/// 预加载 onnxruntime.dll（Windows）：
+/// Qt 插件加载器使用 LOAD_WITH_ALTERED_SEARCH_PATH 加载插件 DLL 时，
+/// 其第三方依赖（如 onnxruntime.dll）可能因搜索路径限制返回 Win32 193
+/// （ERROR_BAD_EXE_FORMAT）。提前以同目录上下文加载一次 onnxruntime，
+/// 后续插件加载依赖解析将命中进程内已加载模块（DLL 单例），从而规避该问题。
+/// 文件不存在或加载失败时静默忽略（不影响其他插件）。
+void preloadOnnxRuntimeIfPresent(const QString &pluginsDir)
+{
+#ifdef Q_OS_WIN
+    const QString onnxPath = QDir(pluginsDir).filePath(QStringLiteral("onnxruntime.dll"));
+    if (QFileInfo::exists(onnxPath)) {
+        (void)LoadLibraryExW(onnxPath.toStdWString().c_str(), nullptr,
+                             LOAD_WITH_ALTERED_SEARCH_PATH);
+        // 忽略错误：若加载失败，稍后插件加载时按常规路径解析，仅 XFeat 受影响
+    }
+#else
+    Q_UNUSED(pluginsDir)
+#endif
+}
+
+} // namespace
 
 PluginRegistry &PluginRegistry::instance()
 {
@@ -28,6 +57,8 @@ int PluginRegistry::scanPlugins(const QString &dir)
         qWarning() << "[PluginRegistry] 目录不存在:" << dir;
         return 0;
     }
+
+    preloadOnnxRuntimeIfPresent(d.absolutePath());
 
     const auto files = d.entryList({"*.dll"}, QDir::Files, QDir::Name);
     int loaded = 0;
