@@ -2,4 +2,8 @@
 TEMPLATE = subdirs
 
 SUBDIRS = \
-    sample_descriptor
+    sample_descriptor \
+    sift_descriptor \
+    kaze_descriptor \
+    flann_matcher \
+    bruteforce_matcher

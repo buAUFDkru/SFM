@@ -5,6 +5,7 @@
 #include <QMessageLogContext>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -13,6 +14,7 @@
 #include <opencv2/core.hpp>
 
 #include "plugin/IDescriptorPlugin.h"
+#include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
 #include "plugin/PluginRegistry.h"
 
@@ -89,6 +91,76 @@ void runConcurrencyCheck(IDescriptorPlugin *plugin)
                                       : QStringLiteral(" — 不一致 %1 处").arg(mismatch.load())));
 }
 
+/// 构造一张固定种子的随机噪声构图 (256x256 CV_8UC1)，保证 SIFT/KAZE 有丰富特征
+ImageEntry makeSyntheticTextureImage(int id)
+{
+    ImageEntry img;
+    img.id = id;
+    img.imageGray = cv::Mat(256, 256, CV_8UC1);
+    cv::RNG rng(42);
+    rng.fill(img.imageGray, cv::RNG::UNIFORM, 0, 255);
+    img.imageData = img.imageGray.clone();
+    return img;
+}
+
+/// 构造一对固定种子的随机浮点描述符矩阵 (desc2 = desc1 深度复制，最近邻距离≈0)
+void makeSyntheticFeatures(cv::Mat &desc1, cv::Mat &desc2)
+{
+    desc1 = cv::Mat(32, 64, CV_32F);
+    cv::RNG rng(7);
+    rng.fill(desc1, cv::RNG::UNIFORM, 0.f, 1.f);
+    desc2 = desc1.clone();
+}
+
+/// 对描述符插件做 P2 并发一致性检查（8 线程 × 10 任务，各任务内 createWorker + extract）
+void runDescriptorConcurrencyCheck(IDescriptorPlugin *plugin)
+{
+    const int kThreads = 8;
+    const int kTasksPerThread = 10;
+
+    const ImageEntry img = makeSyntheticTextureImage(0);
+
+    // 串行参考结果
+    auto refWorker = plugin->createWorker(QJsonObject{});
+    if (!refWorker)
+        return;
+    const FeatureResult ref = refWorker->extract(img);
+
+    std::atomic<int> mismatch{0};
+
+    auto workerFn = [&]() {
+        for (int k = 0; k < kTasksPerThread; ++k) {
+            auto w = plugin->createWorker(QJsonObject{});
+            if (!w) {
+                ++mismatch;
+                continue;
+            }
+            const FeatureResult r = w->extract(img);
+            const double descSum =
+                r.descriptors.empty() ? 0.0 : cv::sum(r.descriptors).val[0];
+            const double refSum =
+                ref.descriptors.empty() ? 0.0 : cv::sum(ref.descriptors).val[0];
+            if (r.keypoints.size() != ref.keypoints.size() || descSum != refSum)
+                ++mismatch;
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t)
+        threads.emplace_back(workerFn);
+    for (auto &th : threads) {
+        if (th.joinable())
+            th.join();
+    }
+
+    const int total = kThreads * kTasksPerThread;
+    check(mismatch.load() == 0,
+          QStringLiteral("并发一致性 (%1 线程 × %2 任务, 0 不一致)").arg(kThreads).arg(kTasksPerThread)
+              + (mismatch.load() == 0 ? QStringLiteral(" — 全部与串行一致")
+                                      : QStringLiteral(" — 不一致 %1 处").arg(mismatch.load())));
+}
+
 int run(const QString &pluginsDir)
 {
     auto &reg = PluginRegistry::instance();
@@ -130,6 +202,60 @@ int run(const QString &pluginsDir)
 
     // 线程池并发一致性
     runConcurrencyCheck(plugin);
+
+    // ── P2 描述符插件 (SIFT / KAZE) ──
+    for (const auto &descName : { QStringLiteral("SIFT"), QStringLiteral("KAZE") }) {
+        auto *dp = reg.descriptorPlugin(descName);
+        check(dp != nullptr, "按 id 加载 " + descName + " 插件");
+        if (!dp)
+            continue;
+        auto dw = dp->createWorker(QJsonObject{});
+        check(dw != nullptr, descName + " createWorker 创建成功");
+        if (dw) {
+            const FeatureResult r = dw->extract(makeSyntheticTextureImage(1));
+            check(r.keypoints.size() > 10,
+                  QStringLiteral("%1 提取合成纹理特征 keypoints=%2 (>10)")
+                      .arg(descName)
+                      .arg(r.keypoints.size()));
+        }
+        runDescriptorConcurrencyCheck(dp);
+    }
+
+    // ── P2 匹配器插件 (FLANN / BruteForce) ──
+    for (const auto &matcherName : { QStringLiteral("FLANN"), QStringLiteral("BruteForce") }) {
+        auto *mp = reg.matcherPlugin(matcherName);
+        check(mp != nullptr, "按 id 加载 " + matcherName + " 插件");
+        if (!mp)
+            continue;
+        auto mw = mp->createWorker(QJsonObject{});
+        check(mw != nullptr, matcherName + " createWorker 创建成功");
+        if (mw) {
+            cv::Mat desc1, desc2;
+            makeSyntheticFeatures(desc1, desc2);
+
+            std::vector<std::vector<cv::DMatch>> knn;
+            const bool knnOk = mw->knnMatchPair(desc1, desc2, knn, 2);
+            int good = 0;
+            for (const auto &pair : knn) {
+                if (pair.size() >= 2 && pair[0].distance < 0.8 * pair[1].distance)
+                    ++good;
+            }
+            check(knnOk && good > 25,
+                  QStringLiteral("%1 knnMatch 成功过滤后匹配数 %2 (>25, 距离≈0)")
+                      .arg(matcherName)
+                      .arg(good));
+
+            std::vector<cv::DMatch> matches;
+            const bool singleOk = mw->matchPair(desc1, desc2, matches);
+            double maxD = 0.0;
+            for (const auto &m : matches)
+                maxD = std::max(maxD, static_cast<double>(m.distance));
+            check(singleOk && matches.size() == 32 && maxD < 1e-6,
+                  QStringLiteral("%1 matchPair 返回 %2 个匹配 (距离<1e-6)")
+                      .arg(matcherName)
+                      .arg(matches.size()));
+        }
+    }
 
     return failures > 0 ? 1 : 0;
 }

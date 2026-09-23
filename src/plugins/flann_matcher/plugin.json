@@ -1,0 +1,10 @@
+{
+  "name": "FLANN",
+  "category": "matcher",
+  "version": "1.0.0",
+  "description": "基于 FLANN 快速最近邻搜索的描述符匹配器",
+  "params": [
+    { "name": "trees", "type": "int", "default": 4, "min": 1, "max": 32, "group": "FLANN", "tooltip": "KD 树的棵数" },
+    { "name": "checks", "type": "int", "default": 50, "min": 1, "max": 200, "group": "FLANN", "tooltip": "搜索时回溯节点次数(预留，当前实现未使用)" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "SIFT",
+  "category": "descriptor",
+  "version": "1.0.0",
+  "description": "基于尺度不变特征变换(SIFT)的关键点检测与描述子提取",
+  "params": [
+    { "name": "nOctaveLayers", "type": "int", "default": 3, "min": 1, "max": 10, "group": "SIFT" },
+    { "name": "contrastThreshold", "type": "double", "default": 0.04, "min": 0.0, "max": 1.0, "group": "SIFT", "tooltip": "对比度阈值，过滤低对比度关键点" },
+    { "name": "edgeThreshold", "type": "double", "default": 10.0, "min": 1.0, "max": 100.0, "group": "SIFT", "tooltip": "边缘阈值，过滤位于边缘的关键点" },
+    { "name": "sigma", "type": "double", "default": 1.6, "min": 0.1, "max": 10.0, "group": "SIFT", "tooltip": "高斯金字塔初始尺度" },
+    { "name": "maxFeatures", "type": "int", "default": 8192, "min": 0, "group": "SIFT", "tooltip": "最大特征点数量，0 表示不限制" }
+  ]
+}

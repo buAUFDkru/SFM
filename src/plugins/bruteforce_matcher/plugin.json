@@ -1,0 +1,10 @@
+{
+  "name": "BruteForce",
+  "category": "matcher",
+  "version": "1.0.0",
+  "description": "基于暴力穷举(Brute-Force)的描述符匹配器",
+  "params": [
+    { "name": "normType", "type": "int", "default": -1, "min": -1, "max": 5, "group": "BruteForce", "tooltip": "距离度量：-1=按描述符类型自动选择(二进制→Hamming，浮点→L2)；可显式指定 0=NORM_INF 1=NORM_L1 2=NORM_L2 4=NORM_L2SQR 5=NORM_HAMMING 6=NORM_HAMMING2" },
+    { "name": "crossCheck", "type": "bool", "default": false, "group": "BruteForce", "tooltip": "是否启用交叉验证，仅返回双向一致的匹配" }
+  ]
+}
