@@ -3,8 +3,13 @@ TEMPLATE = lib
 CONFIG  += plugin
 TARGET   = surf_descriptor
 
-# 部署到 app 可执行目录下的 plugins/，供主程序扫描加载
-DESTDIR = $$OUT_PWD/../../app/plugins
+# 部署到 app 可执行文件同级的 plugins/ 子目录（exe 在 release/ 或 debug/ 下），
+# 与主程序默认扫描路径 applicationDirPath()/plugins 保持一致
+CONFIG(debug, debug|release) {
+    DESTDIR = $$OUT_PWD/../../app/debug/plugins
+} else {
+    DESTDIR = $$OUT_PWD/../../app/release/plugins
+}
 
 include(../../../common.pri)
 
