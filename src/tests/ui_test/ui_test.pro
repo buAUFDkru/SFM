@@ -38,5 +38,10 @@ HEADERS += \
     ../../app/ui/ParamWidget/AlgorithmComboPanel.h \
     ../../app/ui/ViewWidget/PointCloudWidget.h
 
-# 插件目录（MainWindow 冒烟测试用），构建时替换为应用的插件部署目录
-DEFINES += PLUGINS_DIR_DEFAULT=\\\"$$OUT_PWD/../../app/plugins\\\"
+# 插件目录（MainWindow 冒烟测试用）——与插件 DESTDIR 对齐：
+# 插件部署到 app 可执行文件同级的 plugins/ 子目录
+CONFIG(debug, debug|release) {
+    DEFINES += PLUGINS_DIR_DEFAULT=\\\"$$OUT_PWD/../../app/debug/plugins\\\"
+} else {
+    DEFINES += PLUGINS_DIR_DEFAULT=\\\"$$OUT_PWD/../../app/release/plugins\\\"
+}
