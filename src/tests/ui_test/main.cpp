@@ -12,12 +12,14 @@
 
 #include <QtTest>
 
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
@@ -28,6 +30,7 @@
 #include "ParamWidget/ParamFormGenerator.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
 #include "ConfigPanel.h"
+#include "DenseReconstructionDialog.h"
 #include "LogWidget/LogConsole.h"
 #include "ControlButtons.h"
 #include "ViewWidget/PointCloudWidget.h"
@@ -394,6 +397,42 @@ private slots:
     }
 };
 
+/// 回归：密集重建对话框参数区可滚动、高度受限
+class TestDenseReconstructionDialog : public QObject
+{
+    Q_OBJECT
+private slots:
+    void scrollableAndHeightCapped()
+    {
+        DenseReconstructionDialog dlg;
+
+        // 切换到参数最多的 PatchMatch，触发表单重建
+        auto *combo = dlg.findChild<QComboBox *>();
+        CHECK_UI(combo != nullptr, "方法下拉框存在");
+        if (!combo)
+            return;
+        const int pm = combo->findData(QStringLiteral("PatchMatch"));
+        CHECK_UI(pm >= 0, "PatchMatch 在方法列表中");
+        if (pm >= 0)
+            combo->setCurrentIndex(pm);
+
+        // 回归：参数区必须使用 QScrollArea（此前对话框超出屏幕高度）
+        auto *scroll = dlg.findChild<QScrollArea *>();
+        CHECK_UI(scroll != nullptr, "参数区为 QScrollArea");
+        CHECK_UI(scroll && qobject_cast<ParamFormGenerator *>(scroll->widget()) != nullptr,
+                 "滚动区内容为参数表单");
+
+        // 回归：对话框最大高度不超过屏幕可用高度的 85%
+        const int screenH = dlg.screen()->availableGeometry().height();
+        CHECK_UI(dlg.maximumHeight() <= static_cast<int>(screenH * 0.85) + 1,
+                 "对话框高度受限（≤85% 屏高）");
+
+        // 滚动改造后参数收集仍正常
+        const QMap<QString, QVariant> params = dlg.selectedParams();
+        CHECK_UI(params.contains(QStringLiteral("numIterations")), "PatchMatch 参数已收集");
+    }
+};
+
 class TestMainWindowSmoke : public QObject
 {
     Q_OBJECT
@@ -437,6 +476,7 @@ int main(int argc, char *argv[])
     status |= QTest::qExec(new TestParamFormGenerator, argc, argv);
     status |= QTest::qExec(new TestAlgorithmComboPanel, argc, argv);
     status |= QTest::qExec(new TestBasicWidgets, argc, argv);
+    status |= QTest::qExec(new TestDenseReconstructionDialog, argc, argv);
     status |= QTest::qExec(new TestDarkTheme, argc, argv);
     status |= QTest::qExec(new TestMainWindowSmoke, argc, argv);
 

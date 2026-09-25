@@ -10,6 +10,8 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QLabel>
+#include <QScrollArea>
+#include <QScreen>
 #include <QVBoxLayout>
 
 #include "pipeline/DenseReconstructionFactory.h"
@@ -172,11 +174,26 @@ void DenseReconstructionDialog::setupUI()
     formLayout->addRow(tr("密集重建方法:"), m_methodCombo);
     mainLayout->addLayout(formLayout);
 
+    // 参数表单放入滚动区域：PatchMatch 等方法参数较多，
+    // 超出可视高度时用滚轮滚动，方法选择与按钮栏保持可见
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_form = new ParamFormGenerator(this);
-    mainLayout->addWidget(m_form);
+    scroll->setWidget(m_form);
+    mainLayout->addWidget(scroll, /*stretch=*/1);
 
     m_buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     mainLayout->addWidget(m_buttonBox);
+
+    // 限制对话框高度不超过屏幕可用高度的 85%，避免超出屏幕
+    if (const QScreen *scr = this->screen()) {
+        const int maxH = static_cast<int>(scr->availableGeometry().height() * 0.85);
+        setMaximumHeight(maxH);
+        resize(minimumSizeHint().expandedTo(QSize(minimumWidth(), maxH / 2)));
+    }
 
     connect(m_methodCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &DenseReconstructionDialog::updateParamsForCurrentMethod);
