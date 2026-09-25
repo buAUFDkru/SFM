@@ -124,8 +124,12 @@ bool ReconstructionPipeline::extractFeaturesViaPlugins(sfm::ThreadPool *threadPo
     m_features.clear();
     m_features.resize(N);
 
-    auto extractOne = [this, plugin](int idx) -> bool {
+    auto extractOne = [this, plugin, N](int idx) -> bool {
         const QString path = m_config.imageFiles[idx];
+        QElapsedTimer imageTimer;
+        imageTimer.start();
+        log(QString("[特征提取] (%1/%2) 开始: %3")
+                .arg(idx + 1).arg(N).arg(QFileInfo(path).fileName()));
         cv::Mat color = cv::imread(path.toStdString(), cv::IMREAD_COLOR);
         if (color.empty()) {
             log(QString("错误: 无法读取图像: %1").arg(path));
@@ -152,6 +156,11 @@ bool ReconstructionPipeline::extractFeaturesViaPlugins(sfm::ThreadPool *threadPo
         fr.imageWidth = gray.cols;
         fr.imageHeight = gray.rows;
         fr.imageData = color;
+        log(QString("[特征提取] (%1/%2) 完成: %3 关键点, %4x%5, %6 s")
+                .arg(idx + 1).arg(N)
+                .arg(static_cast<int>(fr.keypoints.size()))
+                .arg(gray.cols).arg(gray.rows)
+                .arg(imageTimer.elapsed() / 1000.0, 0, 'f', 1));
         m_features[idx] = std::move(fr);
         return true;
     };

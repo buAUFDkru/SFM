@@ -10,9 +10,36 @@ ReconstructionWorker::ReconstructionWorker(ReconstructionPipeline *pipeline, QOb
     if (m_pipeline) {
         m_pipeline->setCallbacks(this);
     }
-    // 不再使用 QTimer：
+    // 不使用 QTimer：
     // Worker 线程在 execute() 期间不运行事件循环，QTimer 的 timeout 无法被处理。
-    // 改为在 onLog() 中按时间/数量阈值触发 maybeFlushLog()。
+    // 日志刷新由 onLog() 按时间/数量阈值 + startFlushMonitor() 监视线程共同触发。
+}
+
+ReconstructionWorker::~ReconstructionWorker()
+{
+    stopFlushMonitor();
+}
+
+void ReconstructionWorker::startFlushMonitor()
+{
+    bool expected = false;
+    if (!m_flushMonitorActive.compare_exchange_strong(expected, true))
+        return;   // 已在运行
+    m_flushMonitor = std::thread([this]() {
+        while (m_flushMonitorActive.load()) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(flushIntervalMs));
+            maybeFlushLog();
+        }
+    });
+}
+
+void ReconstructionWorker::stopFlushMonitor()
+{
+    if (!m_flushMonitorActive.exchange(false))
+        return;   // 未在运行
+    if (m_flushMonitor.joinable())
+        m_flushMonitor.join();
 }
 
 void ReconstructionWorker::runFullPipeline()
@@ -23,7 +50,9 @@ void ReconstructionWorker::runFullPipeline()
     }
 
     m_running = true;
+    startFlushMonitor();
     ReconstructionOutput output = m_pipeline->execute();
+    stopFlushMonitor();
     m_running = false;
 
     autoSaveIfNeeded();
@@ -44,7 +73,9 @@ void ReconstructionWorker::runDenseReconstruction()
     }
 
     m_running = true;
+    startFlushMonitor();
     bool ok = m_pipeline->executeDenseReconstruction();
+    stopFlushMonitor();
     m_running = false;
 
     autoSaveIfNeeded();

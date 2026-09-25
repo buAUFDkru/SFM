@@ -6,8 +6,10 @@
 #include <QStringList>
 #include <QVariant>
 #include <QVector>
+#include <atomic>
 #include <chrono>
 #include <mutex>
+#include <thread>
 
 #include "ReconstructionPipeline.h"
 
@@ -27,6 +29,8 @@ class ReconstructionPipeline;
  * 直接 emit logBatchEmitted（通过 Qt::QueuedConnection 投递到 UI 线程）。
  * 不依赖 QTimer，因为 Worker 线程在 execute() 期间不运行事件循环，
  * QTimer 的 timeout 事件无法被处理。
+ * 刷新由独立监视线程周期触发（startFlushMonitor/stopFlushMonitor），
+ * 避免长静默阶段（如特征提取数分钟无日志）时缓冲的日志滞留不显示。
  */
 class ReconstructionWorker : public QObject, public IReconstructionCallbacks
 {
@@ -34,6 +38,7 @@ class ReconstructionWorker : public QObject, public IReconstructionCallbacks
 
 public:
     explicit ReconstructionWorker(ReconstructionPipeline *pipeline, QObject *parent = nullptr);
+    ~ReconstructionWorker() override;
 
     /// 执行完整流水线
     void runFullPipeline();
@@ -77,6 +82,13 @@ private:
     /// 检查是否需要刷新缓冲区（按数量或时间阈值），需要则发射 logBatchEmitted
     void maybeFlushLog(bool force = false);
 
+    /// 启动日志刷新监视线程：execute() 期间周期调用 maybeFlushLog()，
+    /// 保证静默阶段已缓冲的日志也能及时显示
+    void startFlushMonitor();
+
+    /// 停止并等待监视线程退出
+    void stopFlushMonitor();
+
     void autoSaveIfNeeded();
 
     ReconstructionPipeline *m_pipeline;
@@ -91,6 +103,10 @@ private:
     std::chrono::steady_clock::time_point m_lastFlushTime;
     const int flushIntervalMs = 200;   // 最小刷新间隔
     const int flushBatchSize = 10;     // 缓冲区达到此数量时强制刷新
+
+    // 刷新监视线程（仅 execute() 期间存活）
+    std::thread m_flushMonitor;
+    std::atomic<bool> m_flushMonitorActive{false};
 };
 
 #endif // RECONSTRUCTIONWORKER_H
