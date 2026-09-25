@@ -15,8 +15,12 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonObject>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QVBoxLayout>
 
 #include "plugin/ParamSchema.h"
 #include "plugin/PluginRegistry.h"
@@ -307,6 +311,54 @@ private slots:
     }
 };
 
+class TestDarkTheme : public QObject
+{
+    Q_OBJECT
+private slots:
+    void styleSheetPaintsDarkBackground()
+    {
+        // 回归：qss 缺少 QWidget 基类背景规则时，面板保持系统白色背景，
+        // 与浅色文字叠加形成"白底白字"。应用 qss 后背景必须为深色。
+        QFile f(QStringLiteral(APP_SRC_DIR) + QStringLiteral("/style.qss"));
+        CHECK_UI(f.open(QIODevice::ReadOnly | QIODevice::Text), "style.qss 可打开");
+        if (!f.isOpen())
+            return;
+        qApp->setStyleSheet(QString::fromUtf8(f.readAll()));
+        f.close();
+
+        QWidget w;
+        QVBoxLayout lay(&w);
+        lay.addWidget(new QLabel(QStringLiteral("标签"), &w));
+        lay.addWidget(new QLineEdit(&w));
+        lay.addWidget(new QPushButton(QStringLiteral("按钮"), &w));
+        w.resize(240, 180);
+        w.show();
+        QTest::qWaitForWindowExposed(&w);
+
+        const QImage img = w.grab().toImage();
+        CHECK_UI(!img.isNull(), "grab 生成图像");
+        if (!img.isNull()) {
+            // 统计暗色像素占比：qss 生效时 QWidget 背景为 #2b2b2b
+            int dark = 0, total = 0;
+            for (int y = 0; y < img.height(); y += 4) {
+                for (int x = 0; x < img.width(); x += 4) {
+                    const QColor c = img.pixelColor(x, y);
+                    ++total;
+                    if (c.red() < 100 && c.green() < 100 && c.blue() < 100)
+                        ++dark;
+                }
+            }
+            const double ratio = total ? double(dark) / total : 0.0;
+            std::fprintf(stderr, "[ui] 暗色像素占比: %.2f\n", ratio);
+            std::fflush(stderr);
+            CHECK_UI(ratio > 0.5, "暗色背景占比 >50%（白底白字回归）");
+        }
+
+        // 恢复空样式，避免影响后续用例
+        qApp->setStyleSheet(QString());
+    }
+};
+
 class TestMainWindowSmoke : public QObject
 {
     Q_OBJECT
@@ -350,6 +402,7 @@ int main(int argc, char *argv[])
     status |= QTest::qExec(new TestParamFormGenerator, argc, argv);
     status |= QTest::qExec(new TestAlgorithmComboPanel, argc, argv);
     status |= QTest::qExec(new TestBasicWidgets, argc, argv);
+    status |= QTest::qExec(new TestDarkTheme, argc, argv);
     status |= QTest::qExec(new TestMainWindowSmoke, argc, argv);
 
     std::fprintf(stderr, "[ui_test] FAIL 数: %d, RESULT %d\n", g_fail, status);

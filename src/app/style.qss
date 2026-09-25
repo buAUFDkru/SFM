@@ -1,4 +1,12 @@
 /* style.qss —— SFM Reconstructor 全局样式 */
+/* 注意：Qt qss 背景色不向下继承，必须给 QWidget 基类设全局背景，
+   否则中间面板（QSplitter/QScrollArea 内 QWidget）会保持系统默认白色，
+   与浅色文字叠加形成"白底白字"。输入控件等已有专用规则会覆盖本条。 */
+QWidget {
+    background-color: #2b2b2b;
+    color: #e0e0e0;
+}
+
 QMainWindow, QDialog {
     background-color: #2b2b2b;
     color: #e0e0e0;

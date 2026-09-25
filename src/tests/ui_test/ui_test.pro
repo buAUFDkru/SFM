@@ -45,3 +45,6 @@ CONFIG(debug, debug|release) {
 } else {
     DEFINES += PLUGINS_DIR_DEFAULT=\\\"$$OUT_PWD/../../app/release/plugins\\\"
 }
+
+# app 源码目录（暗色主题回归测试读取 style.qss）
+DEFINES += APP_SRC_DIR=\\\"$$PWD/../../app\\\"
