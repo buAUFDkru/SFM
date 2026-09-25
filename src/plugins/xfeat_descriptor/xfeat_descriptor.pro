@@ -11,6 +11,11 @@ CONFIG(debug, debug|release) {
     DESTDIR = $$OUT_PWD/../../app/release/plugins
 }
 
+# 导入库(.lib)/导出表(.exp)重定向到本插件构建目录：
+# 插件由 PluginRegistry 运行时动态加载，无需隐式链接导入库，
+# 使部署目录 plugins/ 只保留运行时 DLL
+win32: QMAKE_LFLAGS += /IMPLIB:$$OUT_PWD/$${TARGET}.lib
+
 include(../../../common.pri)
 
 INCLUDEPATH += ../../core
