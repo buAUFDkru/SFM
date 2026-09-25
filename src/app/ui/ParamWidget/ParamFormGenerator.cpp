@@ -32,10 +32,18 @@ void ParamFormGenerator::setSchemas(const QList<ParamSchema> &schemas)
 {
     m_schemas = schemas;
 
-    // 释放旧内容（先删控件再删布局：布局持有控件引用，删除布局会级联删除
-    // 直接子控件；先 qDeleteAll 保险处理嵌套控件，再 delete layout 释放布局对象）
-    qDeleteAll(findChildren<QWidget *>());
-    delete layout();
+    // 释放旧内容：从布局逐项取下并删除顶层控件（其子控件随级联销毁），
+    // 再删除布局对象（含 stretch 空隙项）。
+    // 注意不能用 qDeleteAll(findChildren<QWidget*>())：返回列表同时包含
+    // 组框与其后代，先删组框会级联销毁子控件，循环再次 delete 同一指针
+    // 造成双重释放（切换算法闪退的根因）。
+    if (QLayout *oldLayout = layout()) {
+        while (QLayoutItem *item = oldLayout->takeAt(0)) {
+            delete item->widget();   // widget 为空时 delete 空指针安全（空隙项）
+            delete item;
+        }
+        delete oldLayout;
+    }
 
     if (m_schemas.isEmpty()) {
         auto *v = new QVBoxLayout(this);

@@ -110,6 +110,12 @@ void ConfigPanel::setupUI()
                                         tr("特征匹配器"), container);
     layout->addWidget(m_matcher);
 
+    // 默认算法选择：描述符 SIFT、匹配器 FLANN。
+    // 下拉框填充顺序来自注册表（QHash 无序），必须显式指定默认项。
+    // 参数传空对象 → 表单按各插件 paramSchema 的默认值填充。
+    m_descriptor->setParams(QStringLiteral("SIFT"), QJsonObject{});
+    m_matcher->setParams(QStringLiteral("FLANN"), QJsonObject{});
+
     QFrame *line2 = new QFrame(container);
     line2->setFrameShape(QFrame::HLine);
     line2->setFrameShadow(QFrame::Sunken);

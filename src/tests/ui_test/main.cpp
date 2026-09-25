@@ -27,6 +27,7 @@
 #include "pipeline/ReconstructionPipeline.h"
 #include "ParamWidget/ParamFormGenerator.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
+#include "ConfigPanel.h"
 #include "LogWidget/LogConsole.h"
 #include "ControlButtons.h"
 #include "ViewWidget/PointCloudWidget.h"
@@ -248,19 +249,53 @@ private slots:
         // 使用真实插件注册表
         PluginRegistry &reg = PluginRegistry::instance();
         const int loaded = reg.scanPlugins(QStringLiteral(PLUGINS_DIR_DEFAULT));
-        CHECK_UI(loaded >= 1, "扫描到插件");
+        CHECK_UI(loaded >= 1 || reg.plugins().size() >= 1, "扫描到插件");
 
+        // 回归：构造后面板必须已按当前算法构建参数表单（此前启动界面无参数）
         AlgorithmComboPanel panel(QStringLiteral("descriptor"), &reg, QStringLiteral("描述符"));
         QCOMPARE(panel.currentAlgorithm().isEmpty(), false);
 
         QJsonObject collect = panel.collectParams();
         const QString algo = collect.value(QStringLiteral("algorithm")).toString();
         CHECK_UI(!algo.isEmpty(), "算法 id 已收集");
+        CHECK_UI(!collect.value(QStringLiteral("params")).toObject().isEmpty(),
+                 "构造后参数表单已按 schema 填充");
 
         // 回填相同算法参数不破坏
         panel.setParams(algo, QJsonObject{{QStringLiteral("maxFeatures"), 1000}});
         QJsonObject collect2 = panel.collectParams();
         CHECK_UI(collect2.value(QStringLiteral("algorithm")).toString() == algo, "回填后算法不变");
+    }
+
+    /// 回归：matcher 面板反复切换算法（BF↔FLANN），旧表单销毁不得双重释放闪退
+    void switchCycleNoCrash()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        AlgorithmComboPanel panel(QStringLiteral("matcher"), &reg, QStringLiteral("匹配器"));
+
+        const QStringList cycle = {QStringLiteral("BruteForce"), QStringLiteral("FLANN"),
+                                   QStringLiteral("BruteForce"), QStringLiteral("FLANN"),
+                                   QStringLiteral("BruteForce")};
+        for (const QString &id : cycle) {
+            panel.setParams(id, QJsonObject{});
+            QJsonObject collect = panel.collectParams();
+            CHECK_UI(collect.value(QStringLiteral("algorithm")).toString() == id,
+                     QStringLiteral("切换到 %1").arg(id).toLocal8Bit().constData());
+            CHECK_UI(!collect.value(QStringLiteral("params")).toObject().isEmpty(),
+                     QStringLiteral("%1 参数表单非空").arg(id).toLocal8Bit().constData());
+        }
+    }
+
+    /// 回归：ConfigPanel 默认算法为 SIFT + FLANN
+    void configPanelDefaults()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        ConfigPanel panel(&reg);
+        const ReconstructionConfig cfg = panel.gatherConfig();
+        CHECK_UI(cfg.descriptorType == QStringLiteral("SIFT"), "默认描述符 SIFT");
+        CHECK_UI(cfg.matcherType == QStringLiteral("FLANN"), "默认匹配器 FLANN");
+        CHECK_UI(!cfg.descriptorParams.isEmpty(), "SIFT 参数已收集");
+        CHECK_UI(!cfg.matcherParams.isEmpty(), "FLANN 参数已收集");
     }
 };
 

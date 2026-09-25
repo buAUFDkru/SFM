@@ -55,6 +55,10 @@ AlgorithmComboPanel::AlgorithmComboPanel(const QString &category,
                 emit changed();
             });
     connect(m_form, &ParamFormGenerator::valuesChanged, this, &AlgorithmComboPanel::changed);
+
+    // 初始填充下拉框发生在 connect 之前，currentIndexChanged 不会触发，
+    // 必须显式构建一次表单，否则启动界面不显示当前算法的参数
+    rebuildForm();
 }
 
 QString AlgorithmComboPanel::currentAlgorithm() const
@@ -76,13 +80,17 @@ QJsonObject AlgorithmComboPanel::collectParams() const
 
 void AlgorithmComboPanel::setParams(const QString &algorithm, const QJsonObject &params)
 {
+    // 索引实际变化时由 currentIndexChanged 触发重建，避免双重 rebuild
+    bool rebuilt = false;
     if (m_registry) {
         const int idx = m_algoCombo->findData(algorithm);
-        if (idx >= 0) {
+        if (idx >= 0 && idx != m_algoCombo->currentIndex()) {
             m_algoCombo->setCurrentIndex(idx);
-            rebuildForm();
+            rebuilt = true;
         }
     }
+    if (!rebuilt)
+        rebuildForm();
     m_form->setParams(params);
     emit changed();
 }
