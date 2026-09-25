@@ -65,7 +65,6 @@ private slots:
     void onStagePointCloudReady(const QVector<float> &points,
                                 const QVector<float> &colors,
                                 const QString &stageName);
-    void onCameraPosesReady(const QVector<float> &poses);
     void updateStatusLabel();
 
 private:

@@ -108,12 +108,6 @@ signals:
     void pointCloudReady(const QVector<float> &points, const QVector<float> &colors);
 
     /**
-     * @brief 相机位姿就绪信号
-     * @param poses 相机位姿数组
-     */
-    void cameraPosesReady(const QVector<float> &poses);
-
-    /**
      * @brief 增量重建实时更新信号
      * @param points 点坐标 (x1,y1,z1,x2,y2,z2,...)
      * @param colors 颜色 (r1,g1,b1,r2,g2,b2,...) 范围0-1

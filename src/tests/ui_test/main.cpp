@@ -340,7 +340,6 @@ private slots:
         QVector<float> pts{0, 0, 0, 1, 1, 1};
         QVector<float> cols{1, 0, 0, 0, 1, 0};
         w.updatePointCloud(pts, cols, true);
-        w.setCameraPoses({0, 0, 0, 1, 0, 0}, {1, 0, 0, 1, 0, 0});
         w.setColorMode(PointCloudWidget::ColorMode::Mono);
         w.setPointSize(4.0f);
         w.setBackgroundColor(Qt::white);

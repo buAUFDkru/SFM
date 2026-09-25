@@ -360,13 +360,6 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
     m_pointCloudWidget->updatePointCloud(points, colors, true);
 }
 
-void MainWindow::onCameraPosesReady(const QVector<float> &poses)
-{
-    // PipelineRunner 当前未发射 cameraPosesReady；
-    // 相机轨迹已通过 loadAndDisplayCloudFromOutput 读取 lastOutput 绘制。
-    Q_UNUSED(poses);
-}
-
 void MainWindow::updateStatusLabel()
 {
     // 保留：均衡信号缺失时刷新状态文本
@@ -403,24 +396,6 @@ void MainWindow::loadAndDisplayCloudFromOutput()
         colors.append(pt.b / 255.0f);
     }
     m_pointCloudWidget->updatePointCloud(points, colors, true);
-
-    // 相机轨迹：中心点 + 朝向线段
-    QVector<float> camCenters, camOrient;
-    for (const CameraPose &pose : output.cameraPoses) {
-        if (!pose.registered)
-            continue;
-        // 世界→相机: P_cam = R*P_world + t ⇒ 相机中心 = -R^T * t
-        const cv::Mat t = pose.t;
-        cv::Mat C = -pose.R.t() * t;
-        camCenters.append(static_cast<float>(C.at<double>(0)));
-        camCenters.append(static_cast<float>(C.at<double>(1)));
-        camCenters.append(static_cast<float>(C.at<double>(2)));
-        // 朝向（光轴在相机系为 (0,0,1)，转到世界系 = R^T * (0,0,1) = R 第三行）
-        camOrient.append(static_cast<float>(pose.R.at<double>(2, 0)));
-        camOrient.append(static_cast<float>(pose.R.at<double>(2, 1)));
-        camOrient.append(static_cast<float>(pose.R.at<double>(2, 2)));
-    }
-    m_pointCloudWidget->setCameraPoses(camCenters, camOrient);
 }
 
 void MainWindow::onResetView()

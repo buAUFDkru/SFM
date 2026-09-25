@@ -22,7 +22,6 @@
  *   - 自动适配：载入点云后自动框选包围盒
  *
  * 增强（P4b）：
- *   - 相机轨迹渲染（锥体 + 轨迹折线，来自 cameraPosesReady 数据）
  *   - 着色模式切换（RGB / 单色）
  */
 class PointCloudWidget : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core
@@ -48,9 +47,6 @@ public slots:
 
     /// 清空所有点云数据
     void clearPoints();
-
-    /// 设置相机位姿列表并渲染（central 每相机 3 个坐标，orient 每相机 3 个朝向分量，允许为空）
-    void setCameraPoses(const QVector<float> &centers, const QVector<float> &orientations);
 
     /// 设置点云渲染点大小（像素）
     void setPointSize(float size);
@@ -89,7 +85,6 @@ protected:
 private:
     bool initShaders();
     void updateBuffers();
-    void updateLineBuffers();
     void updateModelViewMatrix();
     void fitToData();
     void recomputeBBox();
@@ -99,8 +94,6 @@ private:
     GLuint m_shaderProgram = 0;
     GLuint m_vbo = 0;
     GLuint m_vao = 0;
-    GLuint m_lineVbo = 0;
-    GLuint m_lineVao = 0;
 
     QMatrix4x4 m_projection;
     QMatrix4x4 m_modelView;
@@ -112,10 +105,6 @@ private:
 
     QVector<float> m_points;
     QVector<float> m_colors;
-
-    // 相机轨迹（逐相机锥体顶点 + 轨迹折线）
-    QVector<float> m_cameraLineVerts;      ///< 折线顶点（xyz 交替）
-    QVector<float> m_cameraLineColors;
 
     QVector3D m_bboxMin;
     QVector3D m_bboxMax;

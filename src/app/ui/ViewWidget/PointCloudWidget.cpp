@@ -34,10 +34,6 @@ PointCloudWidget::~PointCloudWidget()
         glDeleteVertexArrays(1, &m_vao);
     if (m_vbo)
         glDeleteBuffers(1, &m_vbo);
-    if (m_lineVao)
-        glDeleteVertexArrays(1, &m_lineVao);
-    if (m_lineVbo)
-        glDeleteBuffers(1, &m_lineVbo);
     if (m_shaderProgram)
         glDeleteProgram(m_shaderProgram);
     doneCurrent();
@@ -116,11 +112,7 @@ void PointCloudWidget::initializeGL()
     glGenVertexArrays(1, &m_vao);
     glGenBuffers(1, &m_vbo);
 
-    glGenVertexArrays(1, &m_lineVao);
-    glGenBuffers(1, &m_lineVbo);
-
     updateBuffers();
-    updateLineBuffers();
 }
 
 bool PointCloudWidget::initShaders()
@@ -236,17 +228,6 @@ void PointCloudWidget::paintGL()
         glDrawArrays(GL_POINTS, 0, m_points.size() / 3);
         glBindVertexArray(0);
     }
-
-    // 相机轨迹折线（固定 2px 线宽，颜色为相机各自的固定色）
-    if (m_cameraLineVerts.size() >= 3) {
-        // 轨迹线用白色
-        GLint lineColorLoc = glGetUniformLocation(m_shaderProgram, "monoColor");
-        glUniform1i(lineColorLoc, 0);   // 使用顶点色
-        glBindVertexArray(m_lineVao);
-        glDrawArrays(GL_LINES, 0, m_cameraLineVerts.size() / 3);
-        glBindVertexArray(0);
-        glUniform1i(lineColorLoc, (m_colorMode == ColorMode::Mono) ? 1 : 0);
-    }
 }
 
 // ── VBO 上传 ──
@@ -277,37 +258,6 @@ void PointCloudWidget::updateBuffers()
 
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
                           reinterpret_cast<void *>(pointBytes));
-    glEnableVertexAttribArray(1);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    doneCurrent();
-}
-
-void PointCloudWidget::updateLineBuffers()
-{
-    makeCurrent();
-    if (!m_lineVao || !m_lineVbo || m_cameraLineVerts.isEmpty()) {
-        doneCurrent();
-        return;
-    }
-
-    glBindVertexArray(m_lineVao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
-
-    size_t vertBytes = m_cameraLineVerts.size() * sizeof(float);
-    size_t colorBytes = m_cameraLineColors.size() * sizeof(float);
-
-    glBufferData(GL_ARRAY_BUFFER, vertBytes + colorBytes, nullptr, GL_STATIC_DRAW);
-    if (vertBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, vertBytes, m_cameraLineVerts.constData());
-    if (colorBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, vertBytes, colorBytes, m_cameraLineColors.constData());
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>(0));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
-                          reinterpret_cast<void *>(vertBytes));
     glEnableVertexAttribArray(1);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -371,46 +321,12 @@ void PointCloudWidget::appendPointCloud(const QVector<float> &points,
     update();
 }
 
-void PointCloudWidget::setCameraPoses(const QVector<float> &centers,
-                                      const QVector<float> &orientations)
-{
-    // 构造轨迹折线：每两个相邻相机中心连成一条线段（LINES）
-    m_cameraLineVerts.clear();
-    m_cameraLineColors.clear();
-
-    const int n = centers.size() / 3;
-    if (n < 2)
-        return;
-
-    // 相机中心轨迹 + 朝向小线段（从中心沿朝向伸出一段）
-    m_cameraLineVerts.reserve(n * 3 * 2 * 2);
-    m_cameraLineColors.reserve(n * 3 * 2 * 2);
-
-    for (int i = 0; i < n - 1; ++i) {
-        float x1 = centers[i * 3], y1 = centers[i * 3 + 1], z1 = centers[i * 3 + 2];
-        float x2 = centers[(i + 1) * 3], y2 = centers[(i + 1) * 3 + 1],
-              z2 = centers[(i + 1) * 3 + 2];
-        m_cameraLineVerts.append({x1, y1, z1, x2, y2, z2});
-        for (int k = 0; k < 2; ++k) {
-            m_cameraLineColors.append({1.0f, 1.0f, 0.0f,
-                                       1.0f, 1.0f, 0.0f});
-        }
-    }
-    m_cameraLineVerts.squeeze();
-    m_cameraLineColors.squeeze();
-    updateLineBuffers();
-    update();
-}
-
 void PointCloudWidget::clearPoints()
 {
     m_points.clear();
     m_colors.clear();
-    m_cameraLineVerts.clear();
-    m_cameraLineColors.clear();
     m_bboxValid = false;
     updateBuffers();
-    updateLineBuffers();
     update();
 }
 
