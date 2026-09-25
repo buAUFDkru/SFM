@@ -1,5 +1,6 @@
 #include "PluginRegistry.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
@@ -24,11 +25,20 @@ namespace {
 void preloadOnnxRuntimeIfPresent(const QString &pluginsDir)
 {
 #ifdef Q_OS_WIN
-    const QString onnxPath = QDir(pluginsDir).filePath(QStringLiteral("onnxruntime.dll"));
-    if (QFileInfo::exists(onnxPath)) {
-        (void)LoadLibraryExW(onnxPath.toStdWString().c_str(), nullptr,
-                             LOAD_WITH_ALTERED_SEARCH_PATH);
-        // 忽略错误：若加载失败，稍后插件加载时按常规路径解析，仅 XFeat 受影响
+    // 依次尝试：plugins 目录（xfeat 插件旁部署）→ exe 同级目录。
+    // 任一命中即完成预加载；全部失败则静默，仅 XFeat 插件加载受影响。
+    const QStringList candidates = {
+        QDir(pluginsDir).filePath(QStringLiteral("onnxruntime.dll")),
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("onnxruntime.dll")),
+    };
+    for (const QString &onnxPath : candidates) {
+        if (!QFileInfo::exists(onnxPath))
+            continue;
+        if (LoadLibraryExW(onnxPath.toStdWString().c_str(), nullptr,
+                           LOAD_WITH_ALTERED_SEARCH_PATH) != nullptr)
+            return;
+        // 忽略错误：继续尝试下一个候选路径
     }
 #else
     Q_UNUSED(pluginsDir)

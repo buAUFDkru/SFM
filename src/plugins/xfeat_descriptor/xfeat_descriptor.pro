@@ -27,3 +27,10 @@ SOURCES += \
     XFeatDescriptorWorker.cpp
 
 DISTFILES += plugin.json
+
+# 构建后自动把 onnxruntime 运行时 DLL 部署到插件输出目录（plugins/），
+# 保证 PluginRegistry 预加载能找到它，避免 Win32 193 加载失败。
+win32 {
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$ONNXRUNTIME_DIR/lib/onnxruntime.dll) $$shell_path($$DESTDIR) $$escape_expand(\n\t)
+    QMAKE_POST_LINK += $$QMAKE_COPY $$shell_path($$ONNXRUNTIME_DIR/lib/onnxruntime_providers_shared.dll) $$shell_path($$DESTDIR)
+}

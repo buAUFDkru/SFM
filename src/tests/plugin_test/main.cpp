@@ -946,7 +946,8 @@ int main(int argc, char *argv[])
     if (argc > 1) {
         pluginsDir = QString::fromLocal8Bit(argv[1]);
     } else {
-        pluginsDir = QCoreApplication::applicationDirPath() + QStringLiteral("/../../../app/plugins");
+        // 插件部署在 app 可执行文件同级的 plugins/ 子目录（exe 位于 release/ 下）
+        pluginsDir = QCoreApplication::applicationDirPath() + QStringLiteral("/../../../app/release/plugins");
     }
 
     const int result = run(pluginsDir);
