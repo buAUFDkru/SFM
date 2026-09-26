@@ -141,7 +141,7 @@ SurfDescriptorWorker::SurfDescriptorWorker(const QJsonObject &params)
     if (params.contains(QStringLiteral("upright")))
         m_upright = params.value(QStringLiteral("upright")).toBool(false);
     if (params.contains(QStringLiteral("maxFeatures")))
-        m_maxFeatures = params.value(QStringLiteral("maxFeatures")).toInt(0);
+        m_maxFeatures = params.value(QStringLiteral("maxFeatures")).toInt(8192);
 }
 
 FeatureResult SurfDescriptorWorker::extract(const ImageEntry &image)
@@ -214,7 +214,7 @@ QList<ParamSchema> SurfDescriptorPlugin::paramSchema() const
     ParamSchema maxFeatures;
     maxFeatures.name = QStringLiteral("maxFeatures");
     maxFeatures.type = ParamSchema::Type::Int;
-    maxFeatures.defaultValue = 0;
+    maxFeatures.defaultValue = 8192;
     maxFeatures.min = 0;
     maxFeatures.group = QStringLiteral("SURF");
     maxFeatures.tooltip = QStringLiteral("最大特征点数量，0 表示不限制");
@@ -284,7 +284,7 @@ KazeDescriptorWorker::KazeDescriptorWorker(const QJsonObject &params)
     if (params.contains(QStringLiteral("diffusivity")))
         m_diffusivity = params.value(QStringLiteral("diffusivity")).toInt(1);
     if (params.contains(QStringLiteral("maxFeatures")))
-        m_maxFeatures = params.value(QStringLiteral("maxFeatures")).toInt(0);
+        m_maxFeatures = params.value(QStringLiteral("maxFeatures")).toInt(8192);
 }
 
 FeatureResult KazeDescriptorWorker::extract(const ImageEntry &image)
@@ -368,7 +368,7 @@ QList<ParamSchema> KazeDescriptorPlugin::paramSchema() const
     ParamSchema maxFeatures;
     maxFeatures.name = QStringLiteral("maxFeatures");
     maxFeatures.type = ParamSchema::Type::Int;
-    maxFeatures.defaultValue = 0;
+    maxFeatures.defaultValue = 8192;
     maxFeatures.min = 0;
     maxFeatures.group = QStringLiteral("KAZE");
     maxFeatures.tooltip = QStringLiteral("最大特征点数量，0 表示不限制");

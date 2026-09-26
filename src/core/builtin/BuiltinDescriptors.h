@@ -78,7 +78,7 @@ private:
     int m_nOctaveLayers = 3;
     bool m_extended = false;
     bool m_upright = false;
-    int m_maxFeatures = 0;
+    int m_maxFeatures = 8192;
 };
 
 /// SURF 内置算法（无状态工厂）
@@ -122,7 +122,7 @@ private:
     int m_nOctaves = 4;
     int m_nOctaveLayers = 4;
     int m_diffusivity = 1;
-    int m_maxFeatures = 0;
+    int m_maxFeatures = 8192;
 };
 
 /// KAZE 内置算法（无状态工厂）

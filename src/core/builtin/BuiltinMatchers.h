@@ -81,7 +81,7 @@ private:
     /// 根据 normType 与描述符类型选择距离度量
     int autoNormType(const cv::Mat &desc) const;
 
-    int m_normType = -1;
+    int m_normType = cv::NORM_L2;   ///< 默认 L2（浮点描述子）；-1 表示按描述符类型自动选择
     bool m_crossCheck = false;
 };
 

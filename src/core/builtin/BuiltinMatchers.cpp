@@ -160,11 +160,12 @@ QList<ParamSchema> BruteForceMatcherPlugin::paramSchema() const
     ParamSchema normType;
     normType.name = QStringLiteral("normType");
     normType.type = ParamSchema::Type::Int;
-    normType.defaultValue = -1;
+    normType.defaultValue = static_cast<int>(cv::NORM_L2);
     normType.min = -1;
-    normType.max = 5;
+    normType.max = 7;
     normType.group = QStringLiteral("BruteForce");
-    normType.tooltip = QStringLiteral("距离度量：-1=按描述符类型自动选择(二进制→Hamming，浮点→L2)；可显式指定 0=NORM_INF 1=NORM_L1 2=NORM_L2 4=NORM_L2SQR 5=NORM_HAMMING 6=NORM_HAMMING2");
+    // OpenCV NormTypes: NORM_INF=1, NORM_L1=2, NORM_L2=4, NORM_L2SQR=5, NORM_HAMMING=6, NORM_HAMMING2=7
+    normType.tooltip = QStringLiteral("距离度量：4=NORM_L2(默认,浮点描述子)；1=NORM_INF 2=NORM_L1 5=NORM_L2SQR 6=NORM_HAMMING 7=NORM_HAMMING2(二进制描述子)；-1=按描述符类型自动选择(二进制→Hamming，浮点→L2)");
 
     ParamSchema crossCheck;
     crossCheck.name = QStringLiteral("crossCheck");
