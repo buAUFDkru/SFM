@@ -12,6 +12,7 @@ struct PluginInfo
     QString version;
     QString description;
     QString filePath;
+    bool builtin = false;    ///< 内置算法（编译进 core，非 DLL 插件）
 
     // 插件实现的接口类型标记（仅用于展示/过滤）
     static constexpr int InterfaceUnknown    = 0;

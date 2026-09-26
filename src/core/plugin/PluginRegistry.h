@@ -15,8 +15,9 @@ class ISfmPlugin;
 /**
  * @brief 插件注册表（单例）。
  *
- * 扫描指定目录下的 *.dll，通过 QPluginLoader 加载并按接口类型注册。
- * 持有 loader 的完整生命周期；加载失败或非法插件跳过，不阻塞其他插件。
+ * 扫描指定目录下的 *.dll，通过 QPluginLoader 加载并按接口类型注册；
+ * 同时支持注册编译进 core 的内置算法（registerBuiltIn，无需 DLL）。
+ * 持有插件/loader 的完整生命周期；加载失败或非法插件跳过，不阻塞其他插件。
  */
 class PluginRegistry : public QObject
 {
@@ -26,6 +27,10 @@ public:
 
     /// 扫描 dir 下所有 DLL 并注册插件，返回成功加载的插件数
     int scanPlugins(const QString &dir);
+
+    /// 注册编译进 core 的内置算法（registry 接管所有权，parent 挂到自身）。
+    /// id 冲突或名称/类别为空时拒绝注册并返回 false。
+    bool registerBuiltIn(ISfmPlugin *plugin);
 
     QList<PluginInfo> plugins() const;
     QList<PluginInfo> byCategory(const QString &category) const;

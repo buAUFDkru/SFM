@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QSet>
 
+#include <algorithm>
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -147,6 +149,47 @@ int PluginRegistry::scanPlugins(const QString &dir)
     return loaded;
 }
 
+bool PluginRegistry::registerBuiltIn(ISfmPlugin *plugin)
+{
+    if (!plugin)
+        return false;
+
+    const QString name = plugin->name();
+    const QString category = plugin->category();
+    if (name.isEmpty() || category.isEmpty()) {
+        qWarning() << "[PluginRegistry] 内置算法名称/类别为空，拒绝注册";
+        delete plugin;
+        return false;
+    }
+    if (m_ids.contains(name)) {
+        qWarning() << "[PluginRegistry] 内置算法 id 重复，跳过:" << name;
+        delete plugin;
+        return false;
+    }
+
+    // 所有权移交注册表：随注册表销毁自动释放
+    plugin->setParent(this);
+
+    PluginInfo info;
+    info.id = name;
+    info.name = name;
+    info.category = category;
+    info.version = plugin->version();
+    info.description = plugin->description();
+    info.builtin = true;
+    if (qobject_cast<IDescriptorPlugin *>(plugin))
+        info.interfaceType |= PluginInfo::InterfaceDescriptor;
+    if (qobject_cast<IMatcherPlugin *>(plugin))
+        info.interfaceType |= PluginInfo::InterfaceMatcher;
+
+    m_plugins.insert(name, plugin);
+    m_pluginInfo.insert(name, info);
+    m_ids.insert(name);
+
+    qInfo() << "[PluginRegistry] 已注册内置算法:" << name << "(" << category << ")";
+    return true;
+}
+
 QList<PluginInfo> PluginRegistry::plugins() const
 {
     return m_pluginInfo.values();
@@ -159,6 +202,13 @@ QList<PluginInfo> PluginRegistry::byCategory(const QString &category) const
         if (info.category == category)
             result.append(info);
     }
+    // 内置算法优先展示，同级按 id 排序保证稳定顺序
+    std::stable_sort(result.begin(), result.end(),
+                     [](const PluginInfo &a, const PluginInfo &b) {
+                         if (a.builtin != b.builtin)
+                             return a.builtin;   // builtin 在前
+                         return a.id < b.id;
+                     });
     return result;
 }
 

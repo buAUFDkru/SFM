@@ -9,7 +9,7 @@ SFM3_ALG_DEPS = 1
 
 include(../../common.pri)
 
-INCLUDEPATH += . plugin data algorithm pipeline
+INCLUDEPATH += . plugin data algorithm pipeline builtin
 
 HEADERS += \
     plugin/ParamSchema.h \
@@ -19,6 +19,9 @@ HEADERS += \
     plugin/IMatcherPlugin.h \
     plugin/PluginInfo.h \
     plugin/PluginRegistry.h \
+    builtin/BuiltinDescriptors.h \
+    builtin/BuiltinMatchers.h \
+    builtin/registerBuiltIn.h \
     data/SfmTypes.h \
     data/ReconstructionOutput.h \
     data/StereoTypes.h \
@@ -40,6 +43,9 @@ HEADERS += \
 
 SOURCES += \
     plugin/PluginRegistry.cpp \
+    builtin/BuiltinDescriptors.cpp \
+    builtin/BuiltinMatchers.cpp \
+    builtin/registerBuiltIn.cpp \
     algorithm/ThreadPool.cpp \
     algorithm/SfmLogger.cpp \
     algorithm/Initialization.cpp \

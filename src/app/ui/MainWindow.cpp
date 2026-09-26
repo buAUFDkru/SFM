@@ -24,14 +24,16 @@
 #include <QThread>
 
 #include "plugin/PluginRegistry.h"
+#include "builtin/registerBuiltIn.h"
 
 MainWindow::MainWindow(const QString &pluginsDir, QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("SFM Reconstructor v3.0 — 特征重建"));
 
-    // 插件注册表（扫描后供 ConfigPanel 算法下拉）
+    // 插件注册表：先注册内置算法，再扫描 DLL 插件（供 ConfigPanel 算法下拉）
     m_registry = &PluginRegistry::instance();
+    registerBuiltInAlgorithms(*m_registry);
     m_registry->scanPlugins(pluginsDir);
 
     setupMenuBar();
