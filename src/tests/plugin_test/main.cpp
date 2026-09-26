@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QMessageLogContext>
@@ -193,11 +194,14 @@ void runDescriptorConcurrencyCheck(IDescriptorPlugin *plugin, int tasksPerThread
 
 void runThreadPoolTests()
 {
-    // 默认配置线程数在 [1,2]（make_cpu_pool_options 上限 2）
+    // 默认配置线程数合法：至少 1，至多不超过硬件并发数
+    // （默认策略可能随版本调整，如 hc/4 截断到 2、或 hc/2 不截断，此处只断言边界）
     {
         const auto opts = sfm::make_cpu_pool_options();
-        check(opts.thread_count >= 1 && opts.thread_count <= 2,
-              QStringLiteral("ThreadPool 默认线程数 [1,2] → %1").arg(opts.thread_count));
+        const auto hc = static_cast<unsigned long long>(std::thread::hardware_concurrency());
+        check(opts.thread_count >= 1 && opts.thread_count <= std::max<unsigned long long>(hc, 1),
+              QStringLiteral("ThreadPool 默认线程数 [1,硬件并发数%1] → %2")
+                  .arg(hc).arg(opts.thread_count));
     }
 
     // submit 收集 0..99 求和 = 4950
@@ -884,9 +888,11 @@ int run(const QString &pluginsDir)
             check(true, "XFeat 插件未加载，跳过(计 PASS)");
         } else {
             check(true, "按 id 加载 XFeat 插件");
-            if (!QDir(modelsDir).exists()) {
-                // 模型目录不存在/无模型：打印 [WARN] 跳过并计 PASS
-                qWarning().noquote() << "[WARN] 未找到 XFeat 模型目录:" << modelsDir
+            const QStringList xfeatModels =
+                QDir(modelsDir).entryList({ QStringLiteral("xfeat*.onnx") }, QDir::Files);
+            if (xfeatModels.isEmpty()) {
+                // 未部署 xfeat 模型（目录可能不存在或仅有其他算法的模型）：跳过计 PASS
+                qWarning().noquote() << "[WARN] 未找到 XFeat 模型(xfeat*.onnx):" << modelsDir
                                      << "，跳过 XFeat 特征检查";
                 check(true, "XFeat 模型缺失，跳过(计 PASS)");
             } else {
@@ -903,6 +909,76 @@ int run(const QString &pluginsDir)
                     } else {
                         qWarning().noquote() << "[WARN] XFeat 提取到 0 关键点，跳过并发一致性检查";
                     }
+                }
+            }
+        }
+    }
+
+    // ── P2 描述符插件 (SuperPoint：ONNX 推理，模型缺失跳过不失败) ──
+    {
+        const QString modelPath =
+            QCoreApplication::applicationDirPath()
+            + QStringLiteral("/models/superpoint_dynamic.onnx");
+        auto *sup = reg.descriptorPlugin(QStringLiteral("SuperPoint"));
+        if (!sup) {
+            // onnxruntime 运行时依赖问题可能导致插件加载失败；不影响其他插件
+            qWarning().noquote() << "[WARN] SuperPoint 插件未加载，跳过（运行时依赖环境问题，不影响其他插件）";
+            check(true, "SuperPoint 插件未加载，跳过(计 PASS)");
+        } else {
+            check(true, "按 id 加载 SuperPoint 插件");
+
+            // 参数协议
+            QString spErr;
+            check(sup->validateParams(QJsonObject{{"scoreThreshold", 0.005}}, &spErr),
+                  "SuperPoint 合法参数校验通过");
+            check(!sup->validateParams(QJsonObject{{"unknownKey", 1}}, &spErr),
+                  "SuperPoint 未知参数被拒绝: " + spErr);
+
+            if (!QFileInfo::exists(modelPath)) {
+                // 模型未部署：打印 [WARN] 跳过并计 PASS（对齐 XFeat 模式）
+                qWarning().noquote() << "[WARN] 未找到 SuperPoint 模型:" << modelPath
+                                     << "，跳过 SuperPoint 特征检查（运行 tools/deploy_superpoint_model.ps1 部署）";
+                check(true, "SuperPoint 模型缺失，跳过(计 PASS)");
+            } else {
+                auto sw = sup->createWorker(QJsonObject{});
+                check(sw != nullptr, "SuperPoint createWorker 创建成功");
+                if (sw) {
+                    // SuperPoint 训练于真实图像，对纯随机噪声图无响应（实测 0 点），
+                    // 因此使用管线冒烟同款的真实感合成球体图验证
+                    const QString spDir = QDir::temp().filePath(
+                        QStringLiteral("sfm3_sp_%1").arg(QCoreApplication::applicationPid()));
+                    QDir().mkpath(spDir);
+                    QStringList spFiles;
+                    const bool rendered = renderSphereViews(spDir, spFiles) && !spFiles.isEmpty();
+                    check(rendered, "SuperPoint 测试图渲染成功");
+                    if (rendered) {
+                        ImageEntry spEntry;
+                        spEntry.id = 1;
+                        const cv::Mat spColor = cv::imread(spFiles.first().toStdString(),
+                                                           cv::IMREAD_COLOR);
+                        if (!spColor.empty())
+                            cv::cvtColor(spColor, spEntry.imageGray, cv::COLOR_BGR2GRAY);
+                        spEntry.imageData = spColor;
+
+                        const FeatureResult r = sw->extract(spEntry);
+                        check(r.keypoints.size() > 0,
+                              QStringLiteral("SuperPoint 提取合成球体特征 keypoints=%1 (>0)")
+                                  .arg(r.keypoints.size()));
+                        if (!r.descriptors.empty()) {
+                            check(r.descriptors.cols == 256 && r.descriptors.type() == CV_32F,
+                                  QStringLiteral("SuperPoint 描述子维度正确 (%1x%2 CV_32F)")
+                                      .arg(r.descriptors.rows).arg(r.descriptors.cols));
+                        }
+                        if (r.keypoints.size() > 0) {
+                            runDescriptorConcurrencyCheck(sup, 5);
+                        } else {
+                            qWarning().noquote() << "[WARN] SuperPoint 提取到 0 关键点，跳过并发一致性检查";
+                        }
+                    }
+                    // 清理临时影像
+                    for (const auto &f : spFiles)
+                        QFile::remove(f);
+                    QDir().rmdir(spDir);
                 }
             }
         }

@@ -1,0 +1,14 @@
+{
+  "name": "SuperPoint",
+  "category": "descriptor",
+  "version": "1.0.0",
+  "description": "基于 SuperPoint 深度学习特征的关键点检测与 256 维描述子提取(ONNX Runtime 推理)",
+  "params": [
+    { "name": "scoreThreshold", "type": "double", "default": 0.005, "min": 0.0, "max": 1.0, "group": "SuperPoint", "tooltip": "检测阈值，越大提取的点越少" },
+    { "name": "maxFeatures", "type": "int", "default": 8192, "min": 0, "group": "SuperPoint", "tooltip": "最大特征点数量，0 表示不限制" },
+    { "name": "nmsKernelSize", "type": "int", "default": 9, "min": 1, "max": 15, "group": "SuperPoint", "tooltip": "NMS 窗口尺寸(2*nms_radius+1)，SuperPoint 默认 9" },
+    { "name": "nmsMode", "type": "int", "default": 2, "min": 0, "max": 2, "group": "SuperPoint", "tooltip": "NMS 策略：2=官方 batched 1=dilate 0=xfeatc 掩码" },
+    { "name": "padMultiple", "type": "int", "default": 32, "min": 8, "max": 128, "group": "SuperPoint", "tooltip": "图像 padding 到该值的倍数（须为 8 的倍数）" },
+    { "name": "intraThreads", "type": "int", "default": 4, "min": 1, "max": 8, "group": "SuperPoint", "tooltip": "ONNX Runtime intra-op 线程数" }
+  ]
+}

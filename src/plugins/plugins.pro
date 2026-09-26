@@ -6,4 +6,5 @@ TEMPLATE = subdirs
 SUBDIRS = \
     sample_descriptor \
     sample_matcher \
-    xfeat_descriptor
+    xfeat_descriptor \
+    superpoint_descriptor
