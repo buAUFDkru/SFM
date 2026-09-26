@@ -127,8 +127,6 @@ QList<ParamSchema> schemasForMethod(const QString &method)
                QStringLiteral("性能"), QObject::tr("每像素随机采样数（初始化）"));
         addInt(QStringLiteral("numIterations"), 5, 1, 50,
                QStringLiteral("性能"), QObject::tr("邻域传播迭代轮数"));
-        addInt(QStringLiteral("numThreads"), 0, 0, 64,
-               QStringLiteral("性能"), QObject::tr("并行线程数；0 表示按硬件核数估算"));
         addDouble(QStringLiteral("nccSigma"), 0.6, 0.1, 5.0,
                   QStringLiteral("代价"), QObject::tr("NCC 似然函数扩散系数"));
         addDouble(QStringLiteral("sigmaColor"), 51.0, 1.0, 255.0,

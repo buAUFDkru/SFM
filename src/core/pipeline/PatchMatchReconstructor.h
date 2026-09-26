@@ -53,7 +53,6 @@ public:
         int numSamples = 15;                     ///< 每像素随机采样数
         int numIterations = 5;                   ///< 传播迭代轮数
         int filterMinNumConsistent = 2;          ///< 最小一致源视图数
-        int numThreads = 0;                     ///< 线程数，<0 时使用全部
         bool geomConsistency = false;            ///< 是否启用几何一致性（暂未实现）
         bool filter = true;                      ///< 是否启用过滤
         bool allowMissingFiles = false;          ///< 是否允许缺失文件

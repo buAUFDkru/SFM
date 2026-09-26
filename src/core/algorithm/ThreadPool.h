@@ -67,6 +67,20 @@ struct thread_pool_options {
  */
 thread_pool_options make_cpu_pool_options(std::size_t threads = 0);
 
+class ThreadPool;
+
+/**
+ * @brief 进程级全局共享线程池（单例）
+ *
+ * 整个程序（稀疏重建、密集重建、测试等）共用这一个池，避免多套线程池
+ * 叠加导致线程超订。线程数在**首次调用**时确定，后续调用传入的 threads
+ * 被忽略（固定线程数模型，不支持动态扩缩容）。
+ *
+ * @param threads 首次调用时的线程数；0 表示使用 make_cpu_pool_options 默认值
+ * @return 全局线程池引用（生命周期至进程退出，析构时 join 全部工作线程）
+ */
+ThreadPool &globalThreadPool(std::size_t threads = 0);
+
 namespace detail {
 
 /**

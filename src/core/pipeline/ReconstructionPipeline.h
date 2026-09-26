@@ -136,9 +136,6 @@ private:
     void log(const QString &message);
     void setProgress(const QString &stage, int percent);
 
-    /// 获取共享线程池（稀疏/密集重建共用）；不存在时按 m_config.threadCount 创建
-    sfm::ThreadPool *ensureThreadPool();
-
     /// 发射阶段性点云信号
     void emitStageCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud,
                         const QString &stageName);
@@ -164,9 +161,6 @@ private:
     ReconstructionConfig m_config;
     ReconstructionOutput m_lastOutput;
     bool m_stopRequested = false;
-
-    // 共享线程池：execute() 每轮重建重建一次，稀疏与密集阶段复用同一实例
-    std::unique_ptr<sfm::ThreadPool> m_threadPool;
 
     // 阶段暂停同步：等待 UI 选择密集重建方法
     std::mutex m_denseMethodMutex;

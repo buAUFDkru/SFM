@@ -211,10 +211,12 @@ ReconstructionOutput ReconstructionPipeline::execute()
     // 关闭 OpenCV 内部多线程，避免与 sfm3.0 线程池/插件逐任务 Worker 模型叠加
     cv::setNumThreads(1);
 
-    // 创建 CPU 密集型线程池（每轮重建重建一次；稀疏与密集阶段共用同一实例）。
-    // threadCount 为 0 时默认使用逻辑核心数 / 4，保留核心给 UI/OS（4 核 8 线程 → 2 线程）。
-    m_threadPool.reset();
-    sfm::ThreadPool *threadPool = ensureThreadPool();
+    // 使用进程级全局共享线程池（稀疏与密集阶段、测试等全局唯一）。
+    // threadCount 为 0 时默认使用逻辑核心数 / 4，保留核心给 UI/OS（4 核 8 线程 → 2 线程）；
+    // 线程数在池首次创建时确定，后续调用的 threadCount 不再改变池大小。
+    sfm::ThreadPool &threadPool = sfm::globalThreadPool(
+        static_cast<std::size_t>(m_config.threadCount));
+    log(QString("[线程池] 全局共享线程池, 工作线程数: %1").arg(threadPool.thread_count()));
 
     QElapsedTimer stageTimer;
     QElapsedTimer totalTimer;
@@ -227,7 +229,7 @@ ReconstructionOutput ReconstructionPipeline::execute()
     setProgress("特征提取", 0);
     stageTimer.start();
 
-    if (!extractFeaturesViaPlugins(threadPool)) {
+    if (!extractFeaturesViaPlugins(&threadPool)) {
         log("错误: 特征提取失败");
         return output;
     }
@@ -255,7 +257,7 @@ ReconstructionOutput ReconstructionPipeline::execute()
     std::vector<MatchPair> matchPairs;
     if (!matcherService.matchFeatures(
             m_features, m_config.matcherType, m_config.matcherParams, matchPairs,
-            threadPool, [this](const QString &msg) { log(msg); })) {
+            &threadPool, [this](const QString &msg) { log(msg); })) {
         log("错误: 特征匹配失败");
         return output;
     }
@@ -424,9 +426,6 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
             // 设置日志回调，让密集重建方法能实时输出进度日志到 UI
             reconstructor->setLogCallback(
                 [this](const QString &msg) { log(msg); });
-
-            // 注入共享线程池（与稀疏重建阶段同一实例，避免两套池线程超订）
-            reconstructor->setThreadPool(ensureThreadPool());
 
             DenseReconstructionInput denseInput;
             denseInput.cameraPoses = m_cameraPoses;
@@ -702,16 +701,6 @@ void ReconstructionPipeline::log(const QString &message)
     if (m_callbacks) {
         m_callbacks->onLog(message);
     }
-}
-
-sfm::ThreadPool *ReconstructionPipeline::ensureThreadPool()
-{
-    if (!m_threadPool) {
-        m_threadPool = std::make_unique<sfm::ThreadPool>(
-            sfm::make_cpu_pool_options(static_cast<std::size_t>(m_config.threadCount)));
-        log(QString("[线程池] 工作线程数: %1").arg(m_threadPool->thread_count()));
-    }
-    return m_threadPool.get();
 }
 
 void ReconstructionPipeline::setProgress(const QString &stage, int percent)

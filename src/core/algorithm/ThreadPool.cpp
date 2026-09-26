@@ -49,6 +49,14 @@ thread_pool_options make_cpu_pool_options(std::size_t threads) {
     return options;
 }
 
+ThreadPool &globalThreadPool(std::size_t threads) {
+    // Meyers 单例：首次调用以传入线程数构造，生命周期至进程退出，
+    // 析构时自动 shutdown 并 join 全部工作线程（线程安全由静态局部
+    // 初始化的线程安全保证（C++11 magic statics））。
+    static ThreadPool pool(make_cpu_pool_options(threads));
+    return pool;
+}
+
 /**
  * @brief 线程局部变量定义
  *
