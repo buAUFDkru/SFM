@@ -728,6 +728,9 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
                   QStringLiteral("PatchMatch 密集重建成功 (密集点云 %1 点)")
                       .arg(pmOut.denseCloud
                                ? static_cast<int>(pmOut.denseCloud->size()) : 0));
+            // 回归：密集重建应复用管线注入的共享线程池（而非自建局部池）
+            check(cap.logs.join(QStringLiteral("\n")).contains(QStringLiteral("复用管线线程池")),
+                  "PatchMatch 复用管线共享线程池");
             for (const auto &l : cap.logs)
                 std::fprintf(stderr, "[pipe3] %s\n", l.toLocal8Bit().constData());
         }

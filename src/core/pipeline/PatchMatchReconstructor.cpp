@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
 
 namespace {
@@ -79,17 +80,26 @@ DenseReconstructionOutput PatchMatchReconstructor::reconstruct(const DenseRecons
 
     log(QStringLiteral("[PatchMatch] 开始多视图密集重建 (Homography warping + NCC)"));
 
-    // 创建线程池（整个密集重建过程复用，避免频繁创建/销毁）
-    const int numThreads = m_options.numThreads > 0
-        ? m_options.numThreads
-        : static_cast<int>(std::thread::hardware_concurrency() / 2);
-    sfm::ThreadPool pool(sfm::thread_pool_options{
-        "patchmatch_pool",
-        static_cast<std::size_t>(numThreads),
-        true,
-        0
-    });
-    log(QString("[PatchMatch] 并行: %1 线程, 红黑网格").arg(numThreads));
+    // 线程池：优先使用管线注入的池（与稀疏重建共享，避免线程超订）；
+    // 未注入（如独立调用）时回退为本地创建。
+    std::unique_ptr<sfm::ThreadPool> localPool;
+    sfm::ThreadPool *pool = m_threadPool;
+    if (pool) {
+        log(QString("[PatchMatch] 复用管线线程池: %1 线程, 红黑网格")
+                .arg(pool->thread_count()));
+    } else {
+        const int numThreads = m_options.numThreads > 0
+            ? m_options.numThreads
+            : static_cast<int>(std::thread::hardware_concurrency() / 2);
+        localPool = std::make_unique<sfm::ThreadPool>(sfm::thread_pool_options{
+            "patchmatch_pool",
+            static_cast<std::size_t>(numThreads),
+            true,
+            0
+        });
+        pool = localPool.get();
+        log(QString("[PatchMatch] 本地线程池: %1 线程, 红黑网格").arg(numThreads));
+    }
 
     // 1. 构建 PatchMatch 问题：为每张参考图像选择源视图
     std::vector<Problem> problems = buildProblems(input);
@@ -111,7 +121,7 @@ DenseReconstructionOutput PatchMatchReconstructor::reconstruct(const DenseRecons
                 .arg(i + 1).arg(problems.size())
                 .arg(problem.refImageIdx).arg(problem.srcImageIdxs.size()));
 
-        StereoPairResult result = solveProblem(input, problem, depthRanges[problem.refImageIdx], pool);
+        StereoPairResult result = solveProblem(input, problem, depthRanges[problem.refImageIdx], *pool);
         if (!result.depth.empty()) {
             results.push_back(std::move(result));
         }

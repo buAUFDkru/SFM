@@ -38,6 +38,8 @@ struct DenseReconstructionOutput
     QString errorMessage;                               ///< 失败时的错误信息
 };
 
+namespace sfm { class ThreadPool; }
+
 /**
  * @brief 密集重建方法抽象接口
  *
@@ -47,6 +49,9 @@ struct DenseReconstructionOutput
  * 日志回调：通过 setLogCallback() 设置，重建过程中的进度日志通过回调实时输出。
  * 这对长时间运行的密集重建（如 SGBM 立体匹配可能耗时数十分钟）尤为重要，
  * 避免整个阶段无任何日志输出导致用户误以为程序卡死。
+ *
+ * 线程池：由管线通过 setThreadPool() 注入，与稀疏重建共享同一线程池，
+ * 避免两套线程池叠加导致线程超订。未注入时实现可自行创建局部线程池。
  */
 class IDenseReconstructor
 {
@@ -82,6 +87,13 @@ public:
     virtual void setLogCallback(LogCallback callback) { m_logCallback = std::move(callback); }
 
     /**
+     * @brief 注入外部线程池（与稀疏重建阶段共享）
+     * @param pool 管线持有的线程池；由调用方保证在 reconstruct() 期间存活。
+     *             为空时实现退回自建局部线程池的行为。
+     */
+    virtual void setThreadPool(sfm::ThreadPool *pool) { m_threadPool = pool; }
+
+    /**
      * @brief 执行密集重建
      * @param input 输入数据（位姿、匹配、图像等）
      * @return 重建结果
@@ -90,6 +102,7 @@ public:
 
 protected:
     LogCallback m_logCallback;
+    sfm::ThreadPool *m_threadPool = nullptr;  ///< 外部注入的线程池（可为空）
 
     /// 便捷方法：若有日志回调则输出日志
     void log(const QString &message) const
