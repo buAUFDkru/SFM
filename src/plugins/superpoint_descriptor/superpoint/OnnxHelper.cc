@@ -12,7 +12,8 @@ void OnnxHelper::GetModelInfo(Ort::Session &session, std::vector<TensorInfo> &in
     Ort::AllocatorWithDefaultOptions allocator;
 
     size_t numInputNodes = session.GetInputCount();
-    std::cout << "Number of inputs = " << numInputNodes << std::endl;
+    // 插件集成：静默上游控制台输出（每次加载模型都会打印，噪音过大）
+    // std::cout << "Number of inputs = " << numInputNodes << std::endl;
     for (size_t i = 0; i < numInputNodes; ++i) {
         std::string name(session.GetInputNameAllocated(i, allocator).get());
         auto inputTypeInfo = session.GetInputTypeInfo(i);
@@ -21,7 +22,7 @@ void OnnxHelper::GetModelInfo(Ort::Session &session, std::vector<TensorInfo> &in
     }
 
     size_t numOutputNodes = session.GetOutputCount();
-    std::cout << "Number of outputs = " << numOutputNodes << std::endl;
+    // std::cout << "Number of outputs = " << numOutputNodes << std::endl;
     for (size_t i = 0; i < numOutputNodes; ++i) {
         std::string name(session.GetOutputNameAllocated(i, allocator).get());
         auto outputTypeInfo = session.GetOutputTypeInfo(i);

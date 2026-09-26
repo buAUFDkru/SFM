@@ -1,5 +1,6 @@
 # superpoint_descriptor.pro —— SuperPoint 描述符插件（基于 ONNX Runtime 推理）
-# 上游源码（superpoint/ 子目录）来自 D:/project/python/superpointc，原样拷贝未改动。
+# 上游源码（superpoint/ 子目录）来自 D:/project/python/superpointc，
+# 拷入时仅静默了模型信息与每帧计时的控制台打印（避免刷屏），其余原样。
 TEMPLATE = lib
 CONFIG  += plugin
 TARGET   = superpoint_descriptor

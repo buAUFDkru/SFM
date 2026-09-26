@@ -100,7 +100,8 @@ SuperPoint::SuperPoint(const std::string &modelFile, const Config &cfg) : cfg_(c
         exit(-1);
     }
 
-    OnnxHelper::PrintModelInfo(inputInfos_, outputInfos_);
+    // 插件集成：静默上游控制台输出（模型信息打印噪音过大，需要时用 EnableDump 排查）
+    // OnnxHelper::PrintModelInfo(inputInfos_, outputInfos_);
 }
 
 
@@ -214,9 +215,10 @@ void SuperPoint::DetectAndCompute(const cv::Mat &img, std::vector<cv::KeyPoint> 
 
     if (!dumpDir_.empty()) DumpResult(keys, descs);
 
-    std::cout << "pre=" << t_pre << "s, infer=" << t_infer << "s, softmax=" << t_softmax
-              << "s, flatten=" << t_flatten << "s, nms=" << t_nms << "s, sort=" << t_sort
-              << "s, interp=" << t_interp << "s, keys=" << keys.size() << std::endl;
+    // 插件集成：静默上游每帧推理的计时打印（耗时统计保留在 timer 变量中）
+    // std::cout << "pre=" << t_pre << "s, infer=" << t_infer << "s, softmax=" << t_softmax
+    //           << "s, flatten=" << t_flatten << "s, nms=" << t_nms << "s, sort=" << t_sort
+    //           << "s, interp=" << t_interp << "s, keys=" << keys.size() << std::endl;
 }
 
 
