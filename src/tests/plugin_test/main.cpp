@@ -26,6 +26,7 @@
 #include "algorithm/MatcherService.h"
 #include "algorithm/SfmLogger.h"
 #include "algorithm/ThreadPool.h"
+#include "builtin/registerBuiltIn.h"
 #include "plugin/IDescriptorPlugin.h"
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
@@ -790,8 +791,29 @@ int run(const QString &pluginsDir)
 {
     auto &reg = PluginRegistry::instance();
 
+    // 内置算法（编译进 core）优先注册；幂等，DLL 插件随后扫描
+    registerBuiltInAlgorithms(reg);
+    check(reg.descriptorPlugin("SIFT") != nullptr, "内置 SIFT 已注册");
+    check(reg.matcherPlugin("BruteForce") != nullptr, "内置 BruteForce 已注册");
+
     const int loaded = reg.scanPlugins(pluginsDir);
     check(loaded >= 1, QStringLiteral("扫描到插件(%1)").arg(loaded));
+
+    // 内置算法在 byCategory 中排在 DLL 插件之前，且 builtin 标记正确
+    {
+        const auto descs = reg.byCategory("descriptor");
+        check(!descs.isEmpty() && descs.front().builtin,
+              "byCategory(descriptor) 内置算法排序在前");
+        bool builtinFlagOk = true;
+        for (const auto &info : reg.plugins()) {
+            const bool expectBuiltin = (info.id == "SIFT" || info.id == "SURF" ||
+                                        info.id == "KAZE" || info.id == "FLANN" ||
+                                        info.id == "BruteForce");
+            if (info.builtin != expectBuiltin)
+                builtinFlagOk = false;
+        }
+        check(builtinFlagOk, "PluginInfo.builtin 标记正确");
+    }
 
     const auto infos = reg.plugins();
     check(!infos.isEmpty(), "plugins() 非空");
@@ -916,6 +938,59 @@ int run(const QString &pluginsDir)
                   QStringLiteral("%1 matchPair 返回 %2 个匹配 (距离<1e-6)")
                       .arg(matcherName)
                       .arg(matches.size()));
+        }
+    }
+
+    // ── P2 示例匹配器插件 (SampleMatcher：确定性伪匹配) ──
+    {
+        auto *sp = reg.matcherPlugin(QStringLiteral("SampleMatcher"));
+        check(sp != nullptr, "按 id 加载 SampleMatcher 插件");
+        if (sp) {
+            check(sp->version() == "1.0.0", "SampleMatcher 版本号正确读取");
+
+            QString err;
+            check(sp->validateParams(QJsonObject{{"fixedDistance", 0.5}}, &err),
+                  "SampleMatcher 合法参数校验通过");
+            check(!sp->validateParams(QJsonObject{{"fixedDistance", "bad"}}, &err),
+                  "SampleMatcher 非法参数被拒绝: " + err);
+
+            auto mw = sp->createWorker(QJsonObject{{"fixedDistance", 0.5}});
+            check(mw != nullptr, "SampleMatcher createWorker 创建成功");
+            if (mw) {
+                cv::Mat desc1, desc2;
+                makeSyntheticFeatures(desc1, desc2);
+
+                // knnMatch：每查询 min(k, rows2) 个候选，距离按候选序号递增且确定性
+                std::vector<std::vector<cv::DMatch>> knn;
+                const bool knnOk = mw->knnMatchPair(desc1, desc2, knn, 2);
+                bool knnShapeOk = knnOk && knn.size() == 32;
+                for (const auto &cand : knn) {
+                    if (cand.size() != 2 || cand[0].trainIdx != 0 ||
+                        cand[1].trainIdx != 1 ||
+                        std::abs(cand[0].distance - 0.5f) > 1e-6f ||
+                        std::abs(cand[1].distance - 1.0f) > 1e-6f)
+                        knnShapeOk = false;
+                }
+                check(knnShapeOk,
+                      "SampleMatcher knnMatch 确定性输出 (query×2 候选, 距离 0.5/1.0)");
+
+                // matchPair：第 i 行恒定匹配第 i 行，距离 = fixedDistance
+                std::vector<cv::DMatch> matches;
+                const bool singleOk = mw->matchPair(desc1, desc2, matches);
+                bool singleShapeOk = singleOk && matches.size() == 32;
+                for (const auto &m : matches) {
+                    if (m.queryIdx != m.trainIdx ||
+                        std::abs(m.distance - 0.5f) > 1e-6f)
+                        singleShapeOk = false;
+                }
+                check(singleShapeOk,
+                      "SampleMatcher matchPair 确定性输出 (恒等匹配, 距离=0.5)");
+
+                // 空描述子与真实匹配器行为一致：返回 false
+                std::vector<cv::DMatch> emptyMatches;
+                check(!mw->matchPair(cv::Mat(), desc2, emptyMatches),
+                      "SampleMatcher 空描述子返回 false");
+            }
         }
     }
 

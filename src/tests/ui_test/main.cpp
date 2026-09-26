@@ -26,6 +26,7 @@
 
 #include "plugin/ParamSchema.h"
 #include "plugin/PluginRegistry.h"
+#include "builtin/registerBuiltIn.h"
 #include "pipeline/ReconstructionPipeline.h"
 #include "ParamWidget/ParamFormGenerator.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
@@ -251,6 +252,7 @@ private slots:
     {
         // 使用真实插件注册表
         PluginRegistry &reg = PluginRegistry::instance();
+        registerBuiltInAlgorithms(reg);   // 内置算法（SIFT/SURF/KAZE/FLANN/BF），幂等
         const int loaded = reg.scanPlugins(QStringLiteral(PLUGINS_DIR_DEFAULT));
         CHECK_UI(loaded >= 1 || reg.plugins().size() >= 1, "扫描到插件");
 
