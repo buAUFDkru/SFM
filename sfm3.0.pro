@@ -15,4 +15,5 @@ src/tests.depends   = src/core src/app
 OTHER_FILES += \
     AGENTS.md \
     重构设计文档.md \
+    插件开发规范.md \
     common.pri
