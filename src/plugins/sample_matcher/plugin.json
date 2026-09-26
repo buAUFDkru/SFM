@@ -1,0 +1,9 @@
+{
+  "name": "SampleMatcher",
+  "category": "matcher",
+  "version": "1.0.0",
+  "description": "示例匹配器（确定性伪匹配，仅用于插件框架验证与开发参考）",
+  "params": [
+    { "name": "fixedDistance", "type": "double", "default": 0.5, "min": 0.01, "max": 10.0, "group": "示例", "tooltip": "伪匹配的固定距离值" }
+  ]
+}

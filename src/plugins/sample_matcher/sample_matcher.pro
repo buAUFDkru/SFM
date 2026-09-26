@@ -1,7 +1,7 @@
-# bruteforce_matcher.pro —— BruteForce 匹配器插件
+# sample_matcher.pro —— P1 示例匹配器插件（确定性伪匹配，用于验证加载与接口约定）
 TEMPLATE = lib
 CONFIG  += plugin
-TARGET   = bruteforce_matcher
+TARGET   = sample_matcher
 
 # 部署到 app 可执行文件同级的 plugins/ 子目录（exe 在 release/ 或 debug/ 下），
 # 与主程序默认扫描路径 applicationDirPath()/plugins 保持一致
@@ -19,14 +19,15 @@ win32: QMAKE_LFLAGS += /IMPLIB:$$OUT_PWD/$${TARGET}.lib
 include(../../../common.pri)
 
 INCLUDEPATH += ../../core
+# 链接 core 静态库：接口类(ISfmPlugin/IMatcherPlugin)的 moc meta-object 位于其中
 LIBS += -L$$OUT_PWD/../../core -lsfmcore
 
 HEADERS += \
-    BruteForceMatcherPlugin.h \
-    BruteForceMatcherWorker.h
+    SampleMatcherPlugin.h \
+    SampleMatcherWorker.h
 
 SOURCES += \
-    BruteForceMatcherPlugin.cpp \
-    BruteForceMatcherWorker.cpp
+    SampleMatcherPlugin.cpp \
+    SampleMatcherWorker.cpp
 
 DISTFILES += plugin.json
