@@ -1,4 +1,4 @@
-# make_plugin_sdk.ps1 - assemble the redistributable Plugin SDK
+﻿# make_plugin_sdk.ps1 - assemble the redistributable Plugin SDK
 #
 # Background: third-party plugin developers only need the binary contract
 # (interface headers + sfmcore.lib + common.pri), the official template
