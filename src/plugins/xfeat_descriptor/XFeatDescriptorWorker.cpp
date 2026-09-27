@@ -165,8 +165,8 @@ bool XFeatDescriptorWorker::loadModelForHeight(int imageHeight)
 
     // 加载新模型
     QString modelPath = m_availableModels[bestH];
-    qDebug().noquote() << QStringLiteral("[XFeat] 加载模型: %1 (图像高度=%2, 模型高度=%3)")
-                              .arg(modelPath).arg(imageHeight).arg(bestH);
+    // qDebug().noquote() << QStringLiteral("[XFeat] 加载模型: %1 (图像高度=%2, 模型高度=%3)")
+    //                           .arg(modelPath).arg(imageHeight).arg(bestH);
 
     // 将 QString 转为 wchar_t 数组（Windows 上 ORTCHAR_T = wchar_t）
     std::wstring wsModelPath = modelPath.toStdWString();

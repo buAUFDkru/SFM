@@ -575,14 +575,14 @@ InitResult Initialization::findInitialPair(const std::vector<FeatureResult> &fea
             pairScore *= 1.2;
         }
 
-        qDebug().noquote()
-            << QString("[初始化] 候选对 #%1↔#%2: 内点=%3, 中位角=%4°, 角度权重=%5, 模型=%6, 基线=%7, 评分=%8")
-                   .arg(imgId1).arg(imgId2).arg(validInliers)
-                   .arg(medAngle, 0, 'f', 2)
-                   .arg(angleWeight, 0, 'f', 3)
-                   .arg(modelChoice == 0 ? "F" : "H")
-                   .arg(baseline, 0, 'f', 4)
-                   .arg(pairScore, 0, 'f', 2);
+        // qDebug().noquote()
+        //     << QString("[初始化] 候选对 #%1↔#%2: 内点=%3, 中位角=%4°, 角度权重=%5, 模型=%6, 基线=%7, 评分=%8")
+        //            .arg(imgId1).arg(imgId2).arg(validInliers)
+        //            .arg(medAngle, 0, 'f', 2)
+        //            .arg(angleWeight, 0, 'f', 3)
+        //            .arg(modelChoice == 0 ? "F" : "H")
+        //            .arg(baseline, 0, 'f', 4)
+        //            .arg(pairScore, 0, 'f', 2);
 
         // ── 更新最优结果 ──
         if (pairScore > best.score) {
