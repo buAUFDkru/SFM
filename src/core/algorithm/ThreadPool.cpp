@@ -34,16 +34,16 @@ thread_pool_options make_cpu_pool_options(std::size_t threads) {
     thread_pool_options options;
     options.name = "cpu_pool";
     if (threads == 0) {
-        // 未指定线程数时，默认保留部分核心给 UI/OS，使用逻辑处理器数 / 4。
-        // 例如 4 核 8 线程 CPU：hardware_concurrency() == 8，默认线程数为 2。
+        // 未指定线程数时，默认保留部分核心给 UI/OS，使用逻辑处理器数 / 2。
+        // 例如 4 核 8 线程 CPU：hardware_concurrency() == 8，默认线程数为 4。
         unsigned int hc = std::thread::hardware_concurrency();
-        options.thread_count = std::max<std::size_t>(1, hc > 3 ? hc / 4 : 1);
+        options.thread_count = std::max<std::size_t>(1, hc > 3 ? hc / 2 : 1);
     } else {
         options.thread_count = threads;
     }
     // 限制线程池最多 2 个工作线程，避免在低功耗 CPU 上过度抢占 UI/系统线程调度时间。
     // 工作线程优先级已设为 BelowNormal，但线程数过多仍会导致整体吞吐下降（热降频）。
-    options.thread_count = std::min<std::size_t>(options.thread_count, 2);
+    // options.thread_count = std::min<std::size_t>(options.thread_count, 2);
     options.enable_work_stealing = true;
     options.max_queue_size = 0;
     return options;
