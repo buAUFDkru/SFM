@@ -12,7 +12,8 @@ void registerBuiltInAlgorithms(PluginRegistry &registry)
     registry.registerBuiltIn(new SurfDescriptorPlugin());
     registry.registerBuiltIn(new KazeDescriptorPlugin());
 
-    // 匹配器（OpenCV 自带）
+    // 匹配器（OpenCV 自带 + 归一化最近邻）
     registry.registerBuiltIn(new FlannMatcherPlugin());
     registry.registerBuiltIn(new BruteForceMatcherPlugin());
+    registry.registerBuiltIn(new NearestNeighborMatcherPlugin());
 }
