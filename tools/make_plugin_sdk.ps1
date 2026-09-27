@@ -68,8 +68,11 @@ foreach ($tpl in @("sample_descriptor", "sample_matcher")) {
     Copy-Item $src (Join-Path $tplDir $tpl) -Recurse -Force
 }
 
-# 5. spec document
+# 5. spec + workflow documents
 Copy-Item (Join-Path $repoRoot "插件开发规范.md") $docDir -Force
+if (Test-Path (Join-Path $repoRoot "插件开发流程.md")) {
+    Copy-Item (Join-Path $repoRoot "插件开发流程.md") $docDir -Force
+}
 
 # ── README ───────────────────────────────────────────────────────────────────
 $readme = @"
@@ -86,6 +89,7 @@ $readme = @"
     pri/common.pri         与宿主一致的编译配置与第三方路径（OpenCV 460 / onnxruntime 1.26.0）
     templates/             官方模板插件：sample_descriptor（描述符）、sample_matcher（匹配器）
     doc/插件开发规范.md     插件开发规范（接口三件套、线程模型、ABI 红线、测试要求）
+    doc/插件开发流程.md     插件开发流程（从零到可加载 DLL 的分步操作手册）
 
 ## 快速开始
 
