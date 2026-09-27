@@ -30,3 +30,5 @@ Thumbs.db
 
 # 关键文件不允许误忽略
 !src/plugins/**/plugin.json
+# Plugin SDK 组装产物（tools/make_plugin_sdk.ps1 生成）
+SFM3-PluginSDK/
