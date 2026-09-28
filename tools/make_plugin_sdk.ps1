@@ -1,4 +1,4 @@
-﻿# make_plugin_sdk.ps1 - assemble the redistributable Plugin SDK
+# make_plugin_sdk.ps1 - assemble the redistributable Plugin SDK
 #
 # Background: third-party plugin developers only need the binary contract
 # (interface headers + sfmcore.lib + common.pri), the official template
@@ -63,7 +63,7 @@ Copy-Item (Join-Path $repoRoot "common.pri") $priDir -Force
 
 # 4. official template plugins (reference implementations)
 foreach ($tpl in @("sample_descriptor", "sample_matcher")) {
-    $src = Join-Path $repoRoot "src/plugins/$tpl"
+    $src = Join-Path $repoRoot "templates/plugins/$tpl"
     if (-not (Test-Path $src)) { Write-Error "missing template: $src" }
     Copy-Item $src (Join-Path $tplDir $tpl) -Recurse -Force
 }

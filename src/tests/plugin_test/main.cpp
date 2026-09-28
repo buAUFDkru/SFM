@@ -55,65 +55,6 @@ void check(bool cond, const QString &name)
     }
 }
 
-/// 构造一张合成灰度图
-ImageEntry makeImage(int id, int rows, int cols)
-{
-    ImageEntry img;
-    img.id = id;
-    img.imageGray = cv::Mat(rows, cols, CV_8UC1, cv::Scalar(128));
-    img.imageData = img.imageGray.clone();
-    return img;
-}
-
-/// 用线程池并发调用同一插件的 createWorker() + extract()，断言与串行一致
-/// （验证"工厂无状态 + Worker 逐任务独占"在多线程下不会破坏算法状态）
-void runConcurrencyCheck(IDescriptorPlugin *plugin)
-{
-    const int kThreads = 8;
-    const int kTasksPerThread = 20;
-
-    const QJsonObject params{{"scale", 1.0}};
-    const ImageEntry refImage = makeImage(0, 240, 320);
-
-    // 串行参考结果
-    auto refWorker = plugin->createWorker(params);
-    const FeatureResult ref = refWorker->extract(refImage);
-
-    std::atomic<int> mismatch{0};
-
-    auto workerFn = [&]() {
-        for (int k = 0; k < kTasksPerThread; ++k) {
-            auto w = plugin->createWorker(params);
-            if (!w) {
-                ++mismatch;
-                continue;
-            }
-            const FeatureResult r = w->extract(refImage);
-            const double descSum =
-                r.descriptors.empty() ? 0.0 : cv::sum(r.descriptors).val[0];
-            const double refSum =
-                ref.descriptors.empty() ? 0.0 : cv::sum(ref.descriptors).val[0];
-            if (r.keypoints.size() != ref.keypoints.size() || descSum != refSum)
-                ++mismatch;
-        }
-    };
-
-    std::vector<std::thread> threads;
-    threads.reserve(kThreads);
-    for (int t = 0; t < kThreads; ++t)
-        threads.emplace_back(workerFn);
-    for (auto &th : threads) {
-        if (th.joinable())
-            th.join();
-    }
-
-    const int total = kThreads * kTasksPerThread;
-    check(mismatch.load() == 0,
-          QStringLiteral("并发一致性 (%1 线程 × %2 任务, 0 不一致)").arg(kThreads).arg(kTasksPerThread)
-              + (mismatch.load() == 0 ? QStringLiteral(" — 全部与串行一致")
-                                      : QStringLiteral(" — 不一致 %1 处").arg(mismatch.load())));
-}
-
 /// 构造一张固定种子的随机噪声构图 (256x256 CV_8UC1)，保证 SIFT/KAZE 有丰富特征
 ImageEntry makeSyntheticTextureImage(int id)
 {
@@ -825,38 +766,6 @@ int run(const QString &pluginsDir)
     const auto infos = reg.plugins();
     check(!infos.isEmpty(), "plugins() 非空");
 
-    auto *plugin = reg.descriptorPlugin("SampleDescriptor");
-    check(plugin != nullptr, "按 id 加载 SampleDescriptor 插件");
-    if (!plugin) {
-        qCritical() << "  请确认插件 DLL 已部署到:" << pluginsDir;
-        return failures > 0 ? 1 : 0;
-    }
-
-    check(plugin->version() == "1.0.0", "版本号正确读取");
-
-    const auto schema = plugin->paramSchema();
-    check(schema.size() == 1 && schema[0].name == "scale", "参数协议(scale)正确读取");
-
-    QString err;
-    check(plugin->validateParams(QJsonObject{{"scale", 1.0}}, &err),
-          "合法参数校验通过");
-    check(!plugin->validateParams(QJsonObject{{"scale", "bad"}}, &err),
-          "非法参数被拒绝: " + err);
-
-    // 工厂→Worker 的基本调用
-    {
-        auto w = plugin->createWorker(QJsonObject{{"scale", 1.0}});
-        check(w != nullptr, "createWorker 创建成功");
-        if (w) {
-            const FeatureResult r = w->extract(makeImage(1, 240, 320));
-            check(r.imageId == 1 && r.keypoints.size() == 24,
-                  QStringLiteral("extract 确定性输出 (keypoints=%1)").arg(r.keypoints.size()));
-        }
-    }
-
-    // 线程池并发一致性
-    runConcurrencyCheck(plugin);
-
     // ── P2 描述符插件 (SIFT / KAZE / SURF) ──
     for (const auto &descName : { QStringLiteral("SIFT"), QStringLiteral("KAZE"),
                                   QStringLiteral("SURF") }) {
@@ -1020,59 +929,6 @@ int run(const QString &pluginsDir)
                   QStringLiteral("%1 matchPair 返回 %2 个匹配 (距离<5e-3)")
                       .arg(matcherName)
                       .arg(matches.size()));
-        }
-    }
-
-    // ── P2 示例匹配器插件 (SampleMatcher：确定性伪匹配) ──
-    {
-        auto *sp = reg.matcherPlugin(QStringLiteral("SampleMatcher"));
-        check(sp != nullptr, "按 id 加载 SampleMatcher 插件");
-        if (sp) {
-            check(sp->version() == "1.0.0", "SampleMatcher 版本号正确读取");
-
-            QString err;
-            check(sp->validateParams(QJsonObject{{"fixedDistance", 0.5}}, &err),
-                  "SampleMatcher 合法参数校验通过");
-            check(!sp->validateParams(QJsonObject{{"fixedDistance", "bad"}}, &err),
-                  "SampleMatcher 非法参数被拒绝: " + err);
-
-            auto mw = sp->createWorker(QJsonObject{{"fixedDistance", 0.5}});
-            check(mw != nullptr, "SampleMatcher createWorker 创建成功");
-            if (mw) {
-                cv::Mat desc1, desc2;
-                makeSyntheticFeatures(desc1, desc2);
-
-                // knnMatch：每查询 min(k, rows2) 个候选，距离按候选序号递增且确定性
-                std::vector<std::vector<cv::DMatch>> knn;
-                const bool knnOk = mw->knnMatchPair(desc1, desc2, knn, 2);
-                bool knnShapeOk = knnOk && knn.size() == 32;
-                for (const auto &cand : knn) {
-                    if (cand.size() != 2 || cand[0].trainIdx != 0 ||
-                        cand[1].trainIdx != 1 ||
-                        std::abs(cand[0].distance - 0.5f) > 1e-6f ||
-                        std::abs(cand[1].distance - 1.0f) > 1e-6f)
-                        knnShapeOk = false;
-                }
-                check(knnShapeOk,
-                      "SampleMatcher knnMatch 确定性输出 (query×2 候选, 距离 0.5/1.0)");
-
-                // matchPair：第 i 行恒定匹配第 i 行，距离 = fixedDistance
-                std::vector<cv::DMatch> matches;
-                const bool singleOk = mw->matchPair(desc1, desc2, matches);
-                bool singleShapeOk = singleOk && matches.size() == 32;
-                for (const auto &m : matches) {
-                    if (m.queryIdx != m.trainIdx ||
-                        std::abs(m.distance - 0.5f) > 1e-6f)
-                        singleShapeOk = false;
-                }
-                check(singleShapeOk,
-                      "SampleMatcher matchPair 确定性输出 (恒等匹配, 距离=0.5)");
-
-                // 空描述子与真实匹配器行为一致：返回 false
-                std::vector<cv::DMatch> emptyMatches;
-                check(!mw->matchPair(cv::Mat(), desc2, emptyMatches),
-                      "SampleMatcher 空描述子返回 false");
-            }
         }
     }
 
