@@ -41,6 +41,9 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <pcl/io/ply_io.h>
+
+#include <cmath>
 #include <vector>
 
 #ifndef PLUGINS_DIR_DEFAULT
@@ -385,22 +388,22 @@ private slots:
         // 每相机 8 条线段 = 16 个端点 = 48 float
         CHECK_UI(lines.size() == 48, "单相机 8 条线段 16 端点");
 
-        // R=I、t=0 → 世界系 = 相机系；显示系绕 X 轴转 180°（y、z 取反）。
+        // R=I、t=0 → 世界系 = 相机系；显示系绕 Z 轴转 180°（x、y 取反）。
         // 端点顺序：光心(0,0,0) → 角点0（相机系 (-hw,-hh,d)，hw=1, hh=0.75）
-        //   → 显示系角点0 = (-1, 0.75, -2)
+        //   → 显示系角点0 = (1, 0.75, 2)
         CHECK_UI(qAbs(lines[0]) < 1e-5f && qAbs(lines[1]) < 1e-5f && qAbs(lines[2]) < 1e-5f,
                  "线段起点为光心（原点）");
-        CHECK_UI(qAbs(lines[3] - (-1.0f)) < 1e-5f && qAbs(lines[4] - 0.75f) < 1e-5f &&
-                     qAbs(lines[5] - (-2.0f)) < 1e-5f, "角点经显示系转换正确");
+        CHECK_UI(qAbs(lines[3] - 1.0f) < 1e-5f && qAbs(lines[4] - 0.75f) < 1e-5f &&
+                     qAbs(lines[5] - 2.0f) < 1e-5f, "角点经显示系转换正确");
 
-        // 光心平移：t=(0,0,-1) → C=-R^T·t=(0,0,1) → 显示系 (0,0,-1)
+        // 光心平移：t=(0,0,-1) → C=-R^T·t=(0,0,1) → 显示系 (0,0,1)（z 轴不变）
         CameraPose pMoved = p;
         pMoved.t = (cv::Mat_<double>(3, 1) << 0.0, 0.0, -1.0);
         poses.push_back(pMoved);
         QVector<float> lines2 = MainWindow::cameraFrustumLines(poses, depth);
         CHECK_UI(lines2.size() == 96, "两相机 16 条线段");
         CHECK_UI(qAbs(lines2[48]) < 1e-5f && qAbs(lines2[49]) < 1e-5f &&
-                     qAbs(lines2[50] - (-1.0f)) < 1e-5f, "光心世界系→显示系平移正确");
+                     qAbs(lines2[50] - 1.0f) < 1e-5f, "光心世界系→显示系平移正确");
 
         // 未注册或矩阵缺失的位姿跳过
         CameraPose pUnreg = p;
@@ -721,6 +724,29 @@ private slots:
         } catch (...) {
             CHECK_UI(false, "管线抛出未知异常");
             return;
+        }
+
+        // 回归：阶段保存的 dense.ply 必须是显示坐标系（与 lastOutput 一致），
+        // 否则打开项目读回的密集点云方向差 180°
+        const ReconstructionOutput &execOut = pipe.lastOutput();
+        if (execOut.denseCloud && !execOut.denseCloud->empty()) {
+            pcl::PointCloud<pcl::PointXYZRGB> stageDense;
+            pcl::io::loadPLYFile((projDir + QStringLiteral("/clouds/dense.ply"))
+                                     .toStdString(), stageDense);
+            bool coordsMatch = !stageDense.empty() &&
+                               stageDense.size() == execOut.denseCloud->size();
+            if (coordsMatch) {
+                const size_t sampleStep =
+                    std::max<size_t>(1, execOut.denseCloud->size() / 20);
+                for (size_t i = 0; i < execOut.denseCloud->size(); i += sampleStep) {
+                    if (std::abs(stageDense.points[i].y - execOut.denseCloud->points[i].y) > 1e-3f ||
+                        std::abs(stageDense.points[i].z - execOut.denseCloud->points[i].z) > 1e-3f) {
+                        coordsMatch = false;
+                        break;
+                    }
+                }
+            }
+            CHECK_UI(coordsMatch, "阶段保存 dense.ply 为显示坐标系（无二次翻转）");
         }
 
         QString err;

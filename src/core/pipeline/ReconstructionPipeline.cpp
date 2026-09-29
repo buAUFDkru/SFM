@@ -34,6 +34,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 
+#include <pcl/console/print.h>
 #include <pcl/conversions.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/ply_io.h>
@@ -353,8 +354,9 @@ ReconstructionOutput ReconstructionPipeline::execute()
     {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr sparsePCL(new pcl::PointCloud<pcl::PointXYZRGB>);
         PointCloudBuilder::instance()->convertToPCL(optPoints, sparsePCL);
-        // 坐标系转换：OpenCV y-down → 标准y-up（绕X轴旋转180°）
-        for (auto &pt : sparsePCL->points) { pt.y = -pt.y; pt.z = -pt.z; }
+        // 坐标系转换：OpenCV y-down → 显示系 y-up（绕Z轴旋转180°，x、y取反；
+        // det=+1 刚体旋转，第一相机看向 +z，与真实地理方向对齐）
+        for (auto &pt : sparsePCL->points) { pt.x = -pt.x; pt.y = -pt.y; }
         emitStageCloud(sparsePCL, "sparse");
         // 保存稀疏点云到项目目录（y-up 坐标系）
         saveStageCloud(sparsePCL, resolveProjectFilePath("clouds/sparse.ply"), "稀疏重建");
@@ -502,32 +504,33 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
 
     // 发射密集点云供UI显示
     if (denseCloud && !denseCloud->empty()) {
-        // 坐标系转换：OpenCV y-down → 标准y-up（绕X轴旋转180°）
+        // 坐标系转换：OpenCV y-down → 显示系 y-up（绕Z轴旋转180°，x、y取反）
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr denseDisplay(new pcl::PointCloud<pcl::PointXYZRGB>);
 
         denseDisplay->resize(denseCloud->size());
         for (size_t i = 0; i < denseCloud->size(); ++i) {
             denseDisplay->points[i] = denseCloud->points[i];
+            denseDisplay->points[i].x = -denseDisplay->points[i].x;
             denseDisplay->points[i].y = -denseDisplay->points[i].y;
-            denseDisplay->points[i].z = -denseDisplay->points[i].z;
         }
         emitStageCloud(denseDisplay, "dense");
-        // 保存密集点云到项目目录
-        saveStageCloud(denseCloud, resolveProjectFilePath("clouds/dense.ply"), "密集重建");
+        // 保存密集点云到项目目录（与稀疏一致保存显示坐标系 y-up，
+        // 否则打开项目时读回的密集点云方向差 180°）
+        saveStageCloud(denseDisplay, resolveProjectFilePath("clouds/dense.ply"), "密集重建");
     }
 
     // =====================================================================
-    // 组装输出（坐标系转换：OpenCV → 标准y-up）
+    // 组装输出（坐标系转换：OpenCV → 显示系 y-up）
     // =====================================================================
     // 密集重建全程在OpenCV坐标系(右手系,y-down,z-forward)中工作。
-    // 导出时绕X轴旋转180°（同时翻转Y和Z），这是正规旋转(det=+1)，
-    // 保持右手系，不会产生镜像/南北颠倒。
+    // 显示变换为绕Z轴旋转180°（x、y取反，z不变），det=+1 正规旋转，
+    // 保持右手系不产生镜像；显示系中 y 向上、第一相机看向 +z。
     if (!m_optPoints.empty()) {
         PointCloudBuilder::instance()->convertToPCL(m_optPoints, output.sparseCloud);
-        // 稀疏点云: y取反, z取反
+        // 稀疏点云: x取反, y取反
         for (auto &pt : output.sparseCloud->points) {
+            pt.x = -pt.x;
             pt.y = -pt.y;
-            pt.z = -pt.z;
         }
     } else if (m_lastOutput.sparseCloud && !m_lastOutput.sparseCloud->empty()) {
         // 项目恢复场景（loadProject 后仅执行密集重建）：无 m_optPoints，
@@ -535,14 +538,14 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
         output.sparseCloud = m_lastOutput.sparseCloud;
     }
 
-    // 密集点云: 创建副本并 y/z 取反
+    // 密集点云: 创建副本并 x/y 取反
     if (denseCloud && !denseCloud->empty()) {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr denseOutput(new pcl::PointCloud<pcl::PointXYZRGB>);
         denseOutput->resize(denseCloud->size());
         for (size_t i = 0; i < denseCloud->size(); ++i) {
             pcl::PointXYZRGB pt = denseCloud->points[i];
+            pt.x = -pt.x;
             pt.y = -pt.y;
-            pt.z = -pt.z;
             denseOutput->points[i] = pt;
         }
         output.denseCloud = denseOutput;
@@ -827,12 +830,17 @@ bool ReconstructionPipeline::loadProject(const QString &path, QString *error)
     }
 
     // ── 加载点云（显示坐标系 y-up）──
+    // PCL 的 savePLYFileBinary 会在文件头写入 camera 元素（focal/k1/k2 等），
+    // 读回时对未处理属性打 PCL_WARN；临时提高冗余度阈值静默（无损数据）
+    const pcl::console::VERBOSITY_LEVEL prevVerbosity =
+        pcl::console::getVerbosityLevel();
+    pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
     if (!m.sparseCloudPath.isEmpty()) {
         const QString plyPath = projectDir + "/" + m.sparseCloudPath;
         if (QFileInfo::exists(plyPath)) {
             try {
                 pcl::io::loadPLYFile(plyPath.toStdString(),
-                                           *m_lastOutput.sparseCloud);
+                                     *m_lastOutput.sparseCloud);
             } catch (const std::exception &e) {
                 log(QString("[项目] 稀疏点云加载失败: %1").arg(e.what()));
             }
@@ -843,12 +851,13 @@ bool ReconstructionPipeline::loadProject(const QString &path, QString *error)
         if (QFileInfo::exists(plyPath)) {
             try {
                 pcl::io::loadPLYFile(plyPath.toStdString(),
-                                           *m_lastOutput.denseCloud);
+                                     *m_lastOutput.denseCloud);
             } catch (const std::exception &e) {
                 log(QString("[项目] 密集点云加载失败: %1").arg(e.what()));
             }
         }
     }
+    pcl::console::setVerbosityLevel(prevVerbosity);
 
     m_lastOutput.cameraPoses = m_cameraPoses;
     m_lastOutput.totalPoints = m.totalPoints;
