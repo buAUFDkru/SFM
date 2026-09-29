@@ -31,6 +31,11 @@
 #include <QStatusBar>
 #include <QThread>
 
+#include <opencv2/core.hpp>
+
+#include <algorithm>
+#include <limits>
+
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
 
@@ -183,6 +188,13 @@ void MainWindow::setupMenuBar()
     wireframe->setCheckable(true);
     connect(wireframe, &QAction::toggled, this, &MainWindow::onWireframeMode);
 
+    QAction *frusta = viewMenu->addAction(tr("显示相机位姿(&P)"));
+    frusta->setCheckable(true);
+    frusta->setChecked(true);
+    connect(frusta, &QAction::toggled, this, [this](bool enabled) {
+        m_pointCloudWidget->setCameraFrustaVisible(enabled);
+    });
+
     // ── 帮助 ──
     QMenu *helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
     QAction *about = helpMenu->addAction(tr("关于(&A)"));
@@ -286,6 +298,10 @@ void MainWindow::onCreateProject()
     markDirty();
     m_logConsole->appendInfo(tr("[项目] 已创建: %1（%2 张图像）")
                                  .arg(dir).arg(dlg.imageFiles().size()));
+
+    // 新项目从空场景开始
+    m_pointCloudWidget->clearPoints();
+    m_pointCloudWidget->clearCameraFrusta();
 }
 
 void MainWindow::onOpenProject()
@@ -670,6 +686,97 @@ void MainWindow::loadAndDisplayCloudFromOutput()
         colors.append(pt.b / 255.0f);
     }
     m_pointCloudWidget->updatePointCloud(points, colors, true);
+
+    updateCameraFrustaFromOutput();
+}
+
+QVector<float> MainWindow::cameraFrustumLines(const std::vector<CameraPose> &poses,
+                                              float depth)
+{
+    QVector<float> lines;
+    if (depth <= 0.0f)
+        return lines;
+
+    for (const auto &pose : poses) {
+        if (!pose.registered || pose.R.empty() || pose.t.empty())
+            continue;
+
+        // 金字塔底面四角（相机系，光心为原点、看 +z；保持图像宽高比）
+        const double hw = 0.5 * depth;
+        const double hh = 0.5 * depth *
+                          (pose.imageWidth > 0 && pose.imageHeight > 0
+                               ? double(pose.imageHeight) / pose.imageWidth
+                               : 0.75);
+        const double camCorners[4][3] = {
+            {-hw, -hh, depth}, {hw, -hh, depth}, {hw, hh, depth}, {-hw, hh, depth}};
+
+        const cv::Mat Rt = pose.R.t();
+        const cv::Mat C = -Rt * pose.t;   // 光心（世界系）
+
+        // 显示坐标系转换：OpenCV y-down → y-up（绕 X 轴 180°，y、z 取反），
+        // 与点云组装时的转换一致，否则金字塔与点云错位
+        const auto toDisplay = [](const cv::Mat &v, QVector<float> &out) {
+            out << float(v.at<double>(0))
+                << float(-v.at<double>(1))
+                << float(-v.at<double>(2));
+        };
+
+        QVector<float> center;
+        toDisplay(C, center);
+        QVector<float> corners[4];
+        for (int i = 0; i < 4; ++i) {
+            const cv::Mat v = Rt * (cv::Mat_<double>(3, 1) << camCorners[i][0],
+                                    camCorners[i][1], camCorners[i][2]) + C;
+            toDisplay(v, corners[i]);
+        }
+
+        // 光心 → 四角（4 条）+ 底面四边（4 条）
+        for (int i = 0; i < 4; ++i)
+            lines << center << corners[i];
+        for (int i = 0; i < 4; ++i)
+            lines << corners[i] << corners[(i + 1) % 4];
+    }
+    return lines;
+}
+
+void MainWindow::updateCameraFrustaFromOutput()
+{
+    if (!m_pipeline)
+        return;
+    const ReconstructionOutput &output = m_pipeline->lastOutput();
+
+    // 金字塔深度取点云包围盒最大边长的 12%（无点云时保持单位深度）
+    float depth = 1.0f;
+    if (output.sparseCloud && !output.sparseCloud->empty()) {
+        cv::Vec3d mn(std::numeric_limits<double>::max(),
+                     std::numeric_limits<double>::max(),
+                     std::numeric_limits<double>::max());
+        cv::Vec3d mx(-mn[0], -mn[1], -mn[2]);
+        for (const auto &pt : output.sparseCloud->points) {
+            mn[0] = std::min(mn[0], double(pt.x));
+            mn[1] = std::min(mn[1], double(pt.y));
+            mn[2] = std::min(mn[2], double(pt.z));
+            mx[0] = std::max(mx[0], double(pt.x));
+            mx[1] = std::max(mx[1], double(pt.y));
+            mx[2] = std::max(mx[2], double(pt.z));
+        }
+        depth = float(0.12 * std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]}));
+        if (depth <= 0.0f)
+            depth = 1.0f;
+    }
+
+    const QVector<float> frusta = cameraFrustumLines(output.cameraPoses, depth);
+    if (frusta.isEmpty()) {
+        m_pointCloudWidget->clearCameraFrusta();
+        return;
+    }
+
+    // 青色线框，与点云形成对比
+    QVector<float> frustaColors;
+    frustaColors.reserve(frusta.size());
+    for (int i = 0; i < frusta.size() / 3; ++i)
+        frustaColors << 0.30f << 0.85f << 1.00f;
+    m_pointCloudWidget->setCameraFrusta(frusta, frustaColors);
 }
 
 void MainWindow::onResetView()

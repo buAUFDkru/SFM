@@ -34,6 +34,10 @@ PointCloudWidget::~PointCloudWidget()
         glDeleteVertexArrays(1, &m_vao);
     if (m_vbo)
         glDeleteBuffers(1, &m_vbo);
+    if (m_lineVao)
+        glDeleteVertexArrays(1, &m_lineVao);
+    if (m_lineVbo)
+        glDeleteBuffers(1, &m_lineVbo);
     if (m_shaderProgram)
         glDeleteProgram(m_shaderProgram);
     doneCurrent();
@@ -111,8 +115,11 @@ void PointCloudWidget::initializeGL()
 
     glGenVertexArrays(1, &m_vao);
     glGenBuffers(1, &m_vbo);
+    glGenVertexArrays(1, &m_lineVao);
+    glGenBuffers(1, &m_lineVbo);
 
     updateBuffers();
+    updateLineBuffers();
 }
 
 bool PointCloudWidget::initShaders()
@@ -228,6 +235,15 @@ void PointCloudWidget::paintGL()
         glDrawArrays(GL_POINTS, 0, m_points.size() / 3);
         glBindVertexArray(0);
     }
+
+    // 相机位姿金字塔线框（颜色取 attribute，不受单色模式影响）
+    if (m_frustaVisible && !m_lineVertices.isEmpty()) {
+        glUniform1i(monoLoc, 0);
+        glLineWidth(1.5f);
+        glBindVertexArray(m_lineVao);
+        glDrawArrays(GL_LINES, 0, m_lineVertices.size() / 3);
+        glBindVertexArray(0);
+    }
 }
 
 // ── VBO 上传 ──
@@ -263,6 +279,63 @@ void PointCloudWidget::updateBuffers()
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     doneCurrent();
+}
+
+void PointCloudWidget::updateLineBuffers()
+{
+    makeCurrent();
+    if (!m_lineVao || !m_lineVbo) {
+        doneCurrent();
+        return;
+    }
+
+    glBindVertexArray(m_lineVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
+
+    size_t vertexBytes = m_lineVertices.size() * sizeof(float);
+    size_t colorBytes = m_lineColors.size() * sizeof(float);
+
+    glBufferData(GL_ARRAY_BUFFER, vertexBytes + colorBytes, nullptr, GL_STATIC_DRAW);
+    if (vertexBytes > 0)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertexBytes, m_lineVertices.constData());
+    if (colorBytes > 0)
+        glBufferSubData(GL_ARRAY_BUFFER, vertexBytes, colorBytes, m_lineColors.constData());
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>(0));
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
+                          reinterpret_cast<void *>(vertexBytes));
+    glEnableVertexAttribArray(1);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    doneCurrent();
+}
+
+// ── 相机位姿金字塔 ──
+
+void PointCloudWidget::setCameraFrusta(const QVector<float> &lineVertices,
+                                       const QVector<float> &lineColors)
+{
+    m_lineVertices = lineVertices;
+    m_lineColors = lineColors;
+    updateLineBuffers();
+    update();
+}
+
+void PointCloudWidget::clearCameraFrusta()
+{
+    m_lineVertices.clear();
+    m_lineColors.clear();
+    updateLineBuffers();
+    update();
+}
+
+void PointCloudWidget::setCameraFrustaVisible(bool visible)
+{
+    m_frustaVisible = visible;
+    update();
 }
 
 // ── 轨道相机矩阵 ──

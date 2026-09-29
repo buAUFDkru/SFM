@@ -47,6 +47,11 @@ public:
     /// 同步执行一次完整重建并将结果存入 lastOutput（测试自检用，阻塞直至完成）
     void runPipelineSyncForTest();
 
+    /// 相机位姿 → 金字塔线框顶点（成对端点，显示坐标系 y-up；depth 为金字塔深度。
+    /// 测试自检用，也供 loadAndDisplayCloudFromOutput 调用）
+    static QVector<float> cameraFrustumLines(const std::vector<CameraPose> &poses,
+                                             float depth);
+
     /// 最近一次重建输出（测试自检用）
     const ReconstructionOutput &lastOutput() const { return m_pipeline ? m_pipeline->lastOutput() : m_lastFallback; }
 
@@ -81,6 +86,8 @@ private:
     void setupCentralWidget();
     void connectSignals();
     void loadAndDisplayCloudFromOutput();
+    /// 将当前输出的相机位姿叠加为金字塔线框（尺度取点云包围盒的 12%）
+    void updateCameraFrustaFromOutput();
 
     /// 重建运行中时提示并禁止项目操作
     bool ensureProjectOperationAllowed();

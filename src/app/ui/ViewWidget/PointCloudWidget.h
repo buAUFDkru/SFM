@@ -72,6 +72,16 @@ public slots:
     /// 线框模式开关（点云无几何拓扑，此处仅作为渲染状态占位）
     void setWireframeMode(bool enabled);
 
+    /// 设置相机位姿金字塔线框（成对线段端点 x,y,z 与对应 RGB 颜色，替换现有内容）
+    void setCameraFrusta(const QVector<float> &lineVertices,
+                         const QVector<float> &lineColors);
+
+    /// 清空相机位姿金字塔
+    void clearCameraFrusta();
+
+    /// 相机金字塔显示开关
+    void setCameraFrustaVisible(bool visible);
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
@@ -85,6 +95,7 @@ protected:
 private:
     bool initShaders();
     void updateBuffers();
+    void updateLineBuffers();
     void updateModelViewMatrix();
     void fitToData();
     void recomputeBBox();
@@ -94,6 +105,13 @@ private:
     GLuint m_shaderProgram = 0;
     GLuint m_vbo = 0;
     GLuint m_vao = 0;
+
+    // 相机位姿金字塔线框（GL_LINES，端点成对；与点云共用着色器，颜色取 attribute 1）
+    GLuint m_lineVao = 0;
+    GLuint m_lineVbo = 0;
+    QVector<float> m_lineVertices;
+    QVector<float> m_lineColors;
+    bool m_frustaVisible = true;
 
     QMatrix4x4 m_projection;
     QMatrix4x4 m_modelView;
