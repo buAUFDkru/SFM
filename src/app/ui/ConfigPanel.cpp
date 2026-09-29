@@ -14,13 +14,9 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
-#include <QHBoxLayout>
 #include <QLabel>
-#include <QLineEdit>
-#include <QPushButton>
 #include <QRegularExpression>
 #include <QTextStream>
-#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "plugin/PluginRegistry.h"
@@ -42,58 +38,27 @@ void ConfigPanel::setupUI()
     layout->setSpacing(8);
     layout->setContentsMargins(8, 8, 8, 8);
 
-    // ── 项目与图像输入 ──
-    auto *inputBox = new QGroupBox(tr("输入"), container);
-    auto *inputLayout = new QVBoxLayout(inputBox);
+    // ── 项目摘要（创建/打开由菜单驱动，这里仅展示） ──
+    auto *projectBox = new QGroupBox(tr("项目"), container);
+    auto *projectLayout = new QVBoxLayout(projectBox);
 
-    auto *projRow = new QHBoxLayout();
-    projRow->addWidget(new QLabel(tr("项目:"), inputBox));
-    m_projectEdit = new QLineEdit(inputBox);
-    m_projectEdit->setPlaceholderText(tr("输出目录"));
-    auto *projBtn = new QToolButton(inputBox);
-    projBtn->setText(QStringLiteral("..."));
-    connect(projBtn, &QToolButton::clicked, this, [this]() {
-        const QString dir = QFileDialog::getExistingDirectory(this, tr("选择项目输出目录"), m_projectEdit->text());
-        if (!dir.isEmpty())
-            setProjectPath(dir);
-    });
-    projRow->addWidget(m_projectEdit, 1);
-    projRow->addWidget(projBtn);
-    inputLayout->addLayout(projRow);
+    m_projectLabel = new QLabel(tr("未打开项目"), projectBox);
+    m_projectLabel->setObjectName("projectLabel");
+    m_projectLabel->setStyleSheet("font-weight: bold;");
+    m_projectLabel->setWordWrap(true);
+    projectLayout->addWidget(m_projectLabel);
 
-    auto *imgRow = new QHBoxLayout();
-    imgRow->addWidget(new QLabel(tr("图像:"), inputBox));
-    m_imagesEdit = new QLineEdit(inputBox);
-    m_imagesEdit->setPlaceholderText(tr("图像文件或目录（可多选）"));
-    m_imagesEdit->setReadOnly(true);
-    auto *imgBtn = new QToolButton(inputBox);
-    imgBtn->setText(QStringLiteral("..."));
-    connect(imgBtn, &QToolButton::clicked, this, [this]() {
-        const QStringList files = QFileDialog::getOpenFileNames(
-            this, tr("选择图像"),
-            QFileInfo(m_projectEdit->text()).absolutePath(),
-            tr("图像 (*.jpg *.jpeg *.png *.bmp *.tiff *.tif)"));
-        if (!files.isEmpty())
-            setImageFiles(files);
-    });
-    auto *dirBtn = new QToolButton(inputBox);
-    dirBtn->setText(tr("目录"));
-    connect(dirBtn, &QToolButton::clicked, this, [this]() {
-        const QString dir = QFileDialog::getExistingDirectory(this, tr("选择图像目录"));
-        if (!dir.isEmpty())
-            setImageDirectory(dir);
-    });
-    imgRow->addWidget(m_imagesEdit, 1);
-    imgRow->addWidget(dirBtn);
-    imgRow->addWidget(imgBtn);
-    inputLayout->addLayout(imgRow);
+    m_projectDetail = new QLabel(tr("通过「文件 → 新建项目」开始"), projectBox);
+    m_projectDetail->setStyleSheet("color: #888;");
+    m_projectDetail->setWordWrap(true);
+    projectLayout->addWidget(m_projectDetail);
 
-    m_importHint = new QLabel(inputBox);
+    m_importHint = new QLabel(projectBox);
     m_importHint->setStyleSheet("color: #888;");
     m_importHint->setWordWrap(true);
-    inputLayout->addWidget(m_importHint);
+    projectLayout->addWidget(m_importHint);
 
-    layout->addWidget(inputBox);
+    layout->addWidget(projectBox);
 
     // ── 描述符算法面板 ──
     m_descriptor = new AlgorithmComboPanel(QStringLiteral("descriptor"), m_registry,
@@ -133,13 +98,15 @@ void ConfigPanel::setupUI()
     connect(m_controls, &ControlButtons::stopClicked, this, &ConfigPanel::stopRequested);
     connect(m_descriptor, &AlgorithmComboPanel::changed, this, &ConfigPanel::configChanged);
     connect(m_matcher, &AlgorithmComboPanel::changed, this, &ConfigPanel::configChanged);
+
+    // 未加载项目时禁用开始按钮
+    setProjectLoaded(false);
 }
 
 ReconstructionConfig ConfigPanel::gatherConfig() const
 {
     ReconstructionConfig config;
     config.imageFiles = m_imageFiles;
-    config.projectPath = m_projectPath;
 
     const QJsonObject desc = m_descriptor->collectParams();
     config.descriptorType = desc.value(QStringLiteral("algorithm")).toString();
@@ -155,20 +122,54 @@ ReconstructionConfig ConfigPanel::gatherConfig() const
     return config;
 }
 
+void ConfigPanel::setProjectSummary(const QString &name, const QString &detail)
+{
+    m_projectLabel->setText(name.isEmpty() ? tr("未打开项目") : name);
+    if (!detail.isEmpty())
+        m_projectDetail->setText(detail);
+    else if (name.isEmpty())
+        m_projectDetail->setText(tr("通过「文件 → 新建项目」开始"));
+}
+
+void ConfigPanel::setProjectLoaded(bool loaded)
+{
+    m_projectLoaded = loaded;
+    m_controls->setStartEnabled(loaded);
+}
+
+void ConfigPanel::setAlgorithms(const QString &descriptorType, const QJsonObject &descriptorParams,
+                                const QString &matcherType, const QJsonObject &matcherParams)
+{
+    m_updating = true;
+    m_descriptor->setParams(descriptorType, descriptorParams);
+    m_matcher->setParams(matcherType, matcherParams);
+    m_updating = false;
+}
+
+void ConfigPanel::setFixedCameraMatrix(const cv::Mat &K, bool fixed)
+{
+    m_cameraMatrix = K.clone();
+    m_fixCameraMatrix = fixed && !K.empty();
+}
+
 void ConfigPanel::setImageFiles(const QStringList &files)
 {
     m_imageFiles = files;
     if (files.isEmpty()) {
-        m_imagesEdit->clear();
-        m_importHint->setText(QString());
+        m_importHint->clear();
+        if (!m_projectLoaded)
+            m_projectDetail->setText(tr("通过「文件 → 新建项目」开始"));
+        else
+            m_projectDetail->setText(tr("0 张图像"));
         return;
     }
-    m_imagesEdit->setText(QString::number(files.size()) + tr(" 张图像"));
+    m_projectDetail->setText(tr("%1 张图像").arg(files.size()));
     m_importHint->setText(QStringLiteral("%1 ... %2")
                               .arg(QFileInfo(files.first()).fileName())
                               .arg(QFileInfo(files.last()).fileName()));
     tryLoadCameraMatrix(QFileInfo(files.first()).absolutePath());
-    emit configChanged();
+    if (!m_updating)
+        emit configChanged();
 }
 
 void ConfigPanel::setImageDirectory(const QString &dir)
@@ -184,6 +185,10 @@ void ConfigPanel::setImageDirectory(const QString &dir)
 
 void ConfigPanel::tryLoadCameraMatrix(const QString &dir)
 {
+    // 项目模式下固定内参由清单管理，覆盖图像目录中的同名文件
+    if (m_projectLoaded && m_fixCameraMatrix)
+        return;
+
     m_cameraMatrix = cv::Mat();
     m_fixCameraMatrix = false;
 
@@ -219,16 +224,4 @@ void ConfigPanel::tryLoadCameraMatrix(const QString &dir)
 int ConfigPanel::imageCount() const
 {
     return m_imageFiles.size();
-}
-
-QString ConfigPanel::projectPath() const
-{
-    return m_projectPath;
-}
-
-void ConfigPanel::setProjectPath(const QString &path)
-{
-    m_projectPath = path;
-    m_projectEdit->setText(path);
-    emit configChanged();
 }

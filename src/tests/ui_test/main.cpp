@@ -28,6 +28,7 @@
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
 #include "pipeline/ReconstructionPipeline.h"
+#include "pipeline/ProjectStore.h"
 #include "ParamWidget/ParamFormGenerator.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
 #include "ConfigPanel.h"
@@ -39,6 +40,8 @@
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include <vector>
 
 #ifndef PLUGINS_DIR_DEFAULT
 #define PLUGINS_DIR_DEFAULT ""
@@ -301,6 +304,13 @@ private slots:
         CHECK_UI(cfg.matcherType == QStringLiteral("FLANN"), "默认匹配器 FLANN");
         CHECK_UI(!cfg.descriptorParams.isEmpty(), "SIFT 参数已收集");
         CHECK_UI(!cfg.matcherParams.isEmpty(), "FLANN 参数已收集");
+
+        // 回归：未加载项目时开始按钮禁用，加载后启用
+        auto *startBtn = panel.findChild<QPushButton *>(QStringLiteral("startBtn"));
+        CHECK_UI(startBtn != nullptr, "开始按钮存在");
+        CHECK_UI(startBtn && !startBtn->isEnabled(), "未加载项目时开始按钮禁用");
+        panel.setProjectLoaded(true);
+        CHECK_UI(startBtn && startBtn->isEnabled(), "加载项目后开始按钮启用");
     }
 };
 
@@ -434,6 +444,225 @@ private slots:
     }
 };
 
+/// 项目文件读写（ProjectStore）往返测试
+class TestProjectStore : public QObject
+{
+    Q_OBJECT
+private slots:
+    void manifestRoundtrip()
+    {
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录创建");
+
+        ProjectManifest m;
+        m.name = QStringLiteral("MyProject");
+        m.createdAt = QDateTime::currentDateTime();
+        m.modifiedAt = QDateTime::currentDateTime();
+        m.imageFiles = {QStringLiteral("D:/imgs/a.jpg"), QStringLiteral("D:/imgs/b.png")};
+        m.descriptorType = QStringLiteral("SIFT");
+        m.descriptorParams = QJsonObject{{QStringLiteral("maxFeatures"), 8192}};
+        m.matcherType = QStringLiteral("FLANN");
+        m.matcherParams = QJsonObject{{QStringLiteral("ratioThreshold"), 0.8}};
+        m.fixCameraMatrix = true;
+        m.cameraMatrix = {458.4, 0, 160, 0, 458.4, 120, 0, 0, 1};
+        m.denseCloudPath = QStringLiteral("clouds/dense.ply");
+        m.totalPoints = 1234;
+        m.reprojectionError = 0.56;
+        m.totalElapsedMs = 4321.5;
+
+        QString err;
+        CHECK_UI(ProjectStore::writeManifest(dir.path(), m, &err), "写清单成功");
+        CHECK_UI(err.isEmpty(), "写清单无错误");
+
+        const QString name = ProjectStore::findManifestName(dir.path());
+        CHECK_UI(name == QStringLiteral("MyProject"), "扫描清单文件名");
+
+        ProjectManifest r;
+        CHECK_UI(ProjectStore::readManifest(dir.path(), name, &r, &err), "读清单成功");
+        CHECK_UI(r.name == m.name, "清单名称");
+        CHECK_UI(r.imageFiles.size() == 2 && r.imageFiles[1] == m.imageFiles[1], "清单图像列表");
+        CHECK_UI(r.descriptorType == QStringLiteral("SIFT"), "清单描述符");
+        CHECK_UI(r.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 8192,
+                 "清单描述符参数");
+        CHECK_UI(r.matcherType == QStringLiteral("FLANN"), "清单匹配器");
+        CHECK_UI(r.fixCameraMatrix, "清单固定内参标志");
+        CHECK_UI(r.cameraMatrix.size() == 9 &&
+                     qAbs(r.cameraMatrix[0] - 458.4) < 1e-9 &&
+                     qAbs(r.cameraMatrix[8] - 1.0) < 1e-9, "清单内参矩阵");
+        CHECK_UI(r.denseCloudPath == QStringLiteral("clouds/dense.ply"), "清单密集点云路径");
+        CHECK_UI(r.totalPoints == 1234 && qAbs(r.reprojectionError - 0.56) < 1e-9,
+                 "清单统计信息");
+    }
+
+    void cameraPosesRoundtrip()
+    {
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录创建");
+
+        std::vector<CameraPose> poses;
+        CameraPose p0;
+        p0.imageId = 0;
+        p0.imageWidth = 640;
+        p0.imageHeight = 480;
+        p0.registered = true;
+        p0.K = (cv::Mat_<double>(3, 3) << 458.4, 0, 320, 0, 458.4, 240, 0, 0, 1);
+        p0.R = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 0.98, -0.2, 0, 0.2, 0.98);
+        p0.t = (cv::Mat_<double>(3, 1) << 0.1, 0.2, 2.8);
+        p0.distortion = cv::Mat::zeros(5, 1, CV_64F);
+        poses.push_back(p0);
+
+        CameraPose p1;
+        p1.imageId = 1;
+        p1.registered = false;  // K/R/t 为空 → 写入默认值，读回应为单位/零矩阵
+        poses.push_back(p1);
+
+        const QString path = dir.filePath(QStringLiteral("poses.json"));
+        QString err;
+        CHECK_UI(ProjectStore::writeCameraPoses(path, poses,
+                                                {QStringLiteral("a.jpg"), QStringLiteral("b.jpg")},
+                                                &err), "写位姿成功");
+        std::vector<CameraPose> out;
+        CHECK_UI(ProjectStore::readCameraPoses(path, &out, &err), "读位姿成功");
+        CHECK_UI(out.size() == 2, "位姿数量");
+        CHECK_UI(out[0].imageId == 0 && out[0].imageWidth == 640 && out[0].registered,
+                 "位姿元数据");
+        CHECK_UI(std::abs(out[0].K.at<double>(0, 0) - 458.4) < 1e-9 &&
+                     std::abs(out[0].t.at<double>(2) - 2.8) < 1e-9, "K/t 数值");
+        CHECK_UI(std::abs(out[0].R.at<double>(1, 1) - 0.98) < 1e-9, "R 数值");
+        CHECK_UI(!out[1].K.empty() && !out[1].R.empty() && !out[1].t.empty(),
+                 "空矩阵读回默认值");
+        CHECK_UI(!out[1].registered, "未注册标志");
+    }
+
+    void matchPairsRoundtrip()
+    {
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录创建");
+
+        std::vector<MatchPair> pairs;
+        MatchPair mp;
+        mp.imageId1 = 0;
+        mp.imageId2 = 1;
+        mp.modelChoice = 1;
+        mp.avgDistance = 123.456;
+        for (int i = 0; i < 5; ++i) {
+            mp.matches.push_back({i, i + 10, 1, 0.5f + i});
+            mp.points1.push_back({10.5 + i, 20.25 + i});
+            mp.points2.push_back({30.75 + i, 40.125 + i});
+        }
+        mp.matchCount = static_cast<int>(mp.matches.size());
+        mp.F = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
+        mp.H = (cv::Mat_<double>(3, 3) << 2, 0, 1, 0, 2, 0, 0, 0, 2);
+        pairs.push_back(mp);
+
+        MatchPair emptyMp;  // 无 F/H 的对
+        emptyMp.imageId1 = 1;
+        emptyMp.imageId2 = 2;
+        pairs.push_back(emptyMp);
+
+        const QString path = dir.filePath(QStringLiteral("pairs.bin"));
+        QString err;
+        CHECK_UI(ProjectStore::writeMatchPairs(path, pairs, &err), "写匹配对成功");
+        std::vector<MatchPair> out;
+        CHECK_UI(ProjectStore::readMatchPairs(path, &out, &err), "读匹配对成功");
+        CHECK_UI(out.size() == 2, "匹配对数量");
+        CHECK_UI(out[0].imageId1 == 0 && out[0].imageId2 == 1 &&
+                     out[0].matchCount == 5 && out[0].modelChoice == 1, "匹配对元数据");
+        CHECK_UI(qAbs(out[0].avgDistance - 123.456) < 1e-9, "平均距离");
+        CHECK_UI(out[0].matches.size() == 5 && out[0].matches[3].trainIdx == 13 &&
+                     std::abs(out[0].matches[3].distance - 3.5f) < 1e-6, "DMatch 往返");
+        CHECK_UI(std::abs(out[0].points1[4].x - 14.5) < 1e-9 &&
+                     std::abs(out[0].points2[4].y - 44.125) < 1e-9, "匹配点坐标往返");
+        CHECK_UI(!out[0].F.empty() && std::abs(out[0].H.at<double>(0, 0) - 2.0) < 1e-9,
+                 "F/H 往返");
+        CHECK_UI(out[1].F.empty() && out[1].H.empty(), "空 F/H 往返");
+    }
+
+    /// 端到端：完整重建 → saveProject → loadProject → 密集续算可用
+    void projectSaveLoadRoundtrip()
+    {
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录创建");
+
+        QStringList files;
+        CHECK_UI(renderSphereViews(dir, files), "合成多视图渲染");
+
+        const QString projDir = dir.path() + QStringLiteral("/proj");
+
+        ReconstructionPipeline pipe;
+        ReconstructionConfig cfg;
+        cfg.imageFiles = files;
+        cfg.projectPath = projDir;
+        cfg.projectName = QStringLiteral("proj");
+        cfg.denseReconstructionMethod = QStringLiteral("StereoSGBM");
+        cfg.denseReconstructionParams = {
+            {QStringLiteral("useWLSFilter"), false},
+            {QStringLiteral("numDisparities"), 64},
+            {QStringLiteral("blockSize"), 5},
+            {QStringLiteral("useHHMode"), false},
+            {QStringLiteral("minDisparity"), 0},
+            {QStringLiteral("maxDepth"), 50.0},
+        };
+        pipe.setConfig(cfg);
+        try {
+            pipe.execute();
+        } catch (const std::exception &e) {
+            CHECK_UI(false, QStringLiteral("管线抛出 std::exception: %1")
+                                .arg(QString::fromUtf8(e.what())).toLocal8Bit().constData());
+            return;
+        } catch (...) {
+            CHECK_UI(false, "管线抛出未知异常");
+            return;
+        }
+
+        QString err;
+        CHECK_UI(pipe.saveProject(&err), "项目保存成功");
+        CHECK_UI(QFile::exists(projDir + QStringLiteral("/proj.sfmproj")), "清单文件存在");
+        CHECK_UI(QFile::exists(projDir + QStringLiteral("/clouds/sparse.ply")),
+                 "稀疏点云文件存在");
+        CHECK_UI(QFile::exists(projDir + QStringLiteral("/cameras/poses.json")),
+                 "相机参数文件存在");
+        CHECK_UI(QFile::exists(projDir + QStringLiteral("/matches/pairs.bin")),
+                 "匹配对文件存在");
+
+        // ── 重新打开：恢复状态 → 密集续算可用 ──
+        ReconstructionPipeline pipe2;
+        CHECK_UI(pipe2.loadProject(projDir, &err), "项目打开成功");
+        CHECK_UI(pipe2.denseReconstructionAvailable(), "密集续算可用");
+        CHECK_UI(pipe2.config().imageFiles.size() == 6, "恢复图像列表");
+        CHECK_UI(pipe2.config().projectName == QStringLiteral("proj"), "恢复项目名");
+
+        const ReconstructionOutput &out = pipe2.lastOutput();
+        CHECK_UI(out.sparseCloud && out.sparseCloud->size() >= 50, "恢复稀疏点云");
+        CHECK_UI(!out.cameraPoses.empty(), "恢复相机位姿");
+
+        // 在恢复状态上直接执行密集重建（跳过稀疏）；
+        // 与 UI 路径（DenseReconstructionDialog → setDenseReconstructionMethod）一致，先指定方法
+        pipe2.setDenseReconstructionMethod(QStringLiteral("StereoSGBM"),
+                                           {{QStringLiteral("useWLSFilter"), false},
+                                            {QStringLiteral("numDisparities"), 64},
+                                            {QStringLiteral("blockSize"), 5},
+                                            {QStringLiteral("useHHMode"), false},
+                                            {QStringLiteral("minDisparity"), 0},
+                                            {QStringLiteral("maxDepth"), 50.0}});
+        bool denseOk = false;
+        try {
+            denseOk = pipe2.executeDenseReconstruction();
+        } catch (const std::exception &e) {
+            CHECK_UI(false, QStringLiteral("密集续算抛出 std::exception: %1")
+                                .arg(QString::fromUtf8(e.what())).toLocal8Bit().constData());
+            return;
+        } catch (...) {
+            CHECK_UI(false, "密集续算抛出未知异常");
+            return;
+        }
+        CHECK_UI(denseOk, "密集续算执行成功");
+        const ReconstructionOutput &out2 = pipe2.lastOutput();
+        CHECK_UI(out2.sparseCloud && out2.sparseCloud->size() >= 50,
+                 "续算后稀疏点云仍可用（沿用项目点云）");
+    }
+};
+
 class TestMainWindowSmoke : public QObject
 {
     Q_OBJECT
@@ -447,8 +676,8 @@ private slots:
         CHECK_UI(renderSphereViews(dir, files), "合成多视图渲染");
 
         MainWindow w(QStringLiteral(PLUGINS_DIR_DEFAULT));
-        w.setImageFilesForTest(files);
-        w.setProjectPathForTest(dir.path());
+        const QString projDir = dir.path() + QStringLiteral("/SmokeProject");
+        w.setProjectForTest(projDir, files);
         try {
             w.runPipelineSyncForTest();
         } catch (const std::exception &e) {
@@ -462,6 +691,8 @@ private slots:
         CHECK_UI(out.sparseCloud && out.sparseCloud->size() >= 50,
                  "UI 路径稀疏点云 ≥50");
         CHECK_UI(w.currentImageCount() == 6, "图像数 6");
+        CHECK_UI(QFile::exists(projDir + QStringLiteral("/SmokeProject.sfmproj")),
+                 "UI 路径项目清单存在");
     }
 };
 
@@ -479,6 +710,7 @@ int main(int argc, char *argv[])
     status |= QTest::qExec(new TestBasicWidgets, argc, argv);
     status |= QTest::qExec(new TestDenseReconstructionDialog, argc, argv);
     status |= QTest::qExec(new TestDarkTheme, argc, argv);
+    status |= QTest::qExec(new TestProjectStore, argc, argv);
     status |= QTest::qExec(new TestMainWindowSmoke, argc, argv);
 
     std::fprintf(stderr, "[ui_test] FAIL 数: %d, RESULT %d\n", g_fail, status);

@@ -15,6 +15,7 @@
 #include "data/ReconstructionOutput.h"
 #include "data/SfmTypes.h"
 #include "data/StereoTypes.h"
+#include "pipeline/ProjectStore.h"
 
 /**
  * @brief 重建配置结构体
@@ -24,7 +25,8 @@
 struct ReconstructionConfig
 {
     QStringList imageFiles;
-    QString projectPath;    ///< 项目路径（输出文件保存路径）
+    QString projectPath;    ///< 项目根目录（输出文件保存路径）
+    QString projectName;    ///< 项目名称（清单文件 <name>.sfmproj；空表示未开项目）
 
     // ── 密集重建阶段配置（方法实现于 P4，接口先占位） ──
     QString denseReconstructionMethod;          ///< 密集重建方法名（空表示在稀疏重建后询问用户）
@@ -121,8 +123,27 @@ public:
     void exportPointCloud(const QString &filePath, const ReconstructionOutput &output);
     void exportPointCloud(const QString &filePath);
 
-    void saveProject(const QString &filePath, const ReconstructionOutput &output);
-    void saveProject(const QString &filePath);
+    /**
+     * @brief 保存项目到 m_config.projectPath（自动保存与手动保存共用）
+     *
+     * 写入点云（clouds/sparse.ply、clouds/dense.ply）、相机参数
+     * （cameras/poses.json）、匹配对（matches/pairs.bin）与清单
+     * （<projectName>.sfmproj）。projectName 为空时视为无项目，返回 false。
+     */
+    bool saveProject(QString *error = nullptr);
+
+    /**
+     * @brief 打开项目：读清单并恢复管线状态（图像/算法配置/相机位姿/匹配对）
+     *
+     * 恢复后 denseReconstructionAvailable() 为 true（清单含位姿时），
+     * 可直接 executeDenseReconstruction() 续算密集重建；
+     * 稀疏/密集点云从 PLY 加载到 lastOutput() 供 UI 显示。
+     * @param path 清单文件路径（*.sfmproj）或项目目录
+     */
+    bool loadProject(const QString &path, QString *error = nullptr);
+
+    /// 打开项目后的清单（未打开时无效，需先判断 loadProject 返回值）
+    const ProjectManifest &manifest() const { return m_manifest; }
 
     const ReconstructionOutput &lastOutput() const { return m_lastOutput; }
 
@@ -174,6 +195,8 @@ private:
     std::vector<FeatureResult> m_features;
     cv::Mat m_K;
     std::vector<Point3D> m_optPoints;
+
+    ProjectManifest m_manifest;  ///< 打开项目后的清单快照
 };
 
 #endif // RECONSTRUCTIONPIPELINE_H

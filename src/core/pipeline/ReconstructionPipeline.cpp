@@ -14,7 +14,9 @@
 #include "plugin/PluginRegistry.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -355,7 +357,7 @@ ReconstructionOutput ReconstructionPipeline::execute()
         for (auto &pt : sparsePCL->points) { pt.y = -pt.y; pt.z = -pt.z; }
         emitStageCloud(sparsePCL, "sparse");
         // 保存稀疏点云到项目目录（y-up 坐标系）
-        saveStageCloud(sparsePCL, resolveProjectFilePath("sparse_cloud.ply"), "稀疏重建");
+        saveStageCloud(sparsePCL, resolveProjectFilePath("clouds/sparse.ply"), "稀疏重建");
     }
 
     // 保存稀疏重建结果，供后续单独执行密集重建
@@ -511,7 +513,7 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
         }
         emitStageCloud(denseDisplay, "dense");
         // 保存密集点云到项目目录
-        saveStageCloud(denseCloud, resolveProjectFilePath("dense_cloud.ply"), "密集重建");
+        saveStageCloud(denseCloud, resolveProjectFilePath("clouds/dense.ply"), "密集重建");
     }
 
     // =====================================================================
@@ -520,12 +522,17 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
     // 密集重建全程在OpenCV坐标系(右手系,y-down,z-forward)中工作。
     // 导出时绕X轴旋转180°（同时翻转Y和Z），这是正规旋转(det=+1)，
     // 保持右手系，不会产生镜像/南北颠倒。
-    PointCloudBuilder::instance()->convertToPCL(m_optPoints, output.sparseCloud);
-
-    // 稀疏点云: y取反, z取反
-    for (auto &pt : output.sparseCloud->points) {
-        pt.y = -pt.y;
-        pt.z = -pt.z;
+    if (!m_optPoints.empty()) {
+        PointCloudBuilder::instance()->convertToPCL(m_optPoints, output.sparseCloud);
+        // 稀疏点云: y取反, z取反
+        for (auto &pt : output.sparseCloud->points) {
+            pt.y = -pt.y;
+            pt.z = -pt.z;
+        }
+    } else if (m_lastOutput.sparseCloud && !m_lastOutput.sparseCloud->empty()) {
+        // 项目恢复场景（loadProject 后仅执行密集重建）：无 m_optPoints，
+        // 沿用从项目 PLY 加载的稀疏点云（已是显示坐标系 y-up）
+        output.sparseCloud = m_lastOutput.sparseCloud;
     }
 
     // 密集点云: 创建副本并 y/z 取反
@@ -548,7 +555,9 @@ void ReconstructionPipeline::runDenseStages(ReconstructionOutput &output)
     }
 
     output.cameraPoses = m_cameraPoses;
-    output.totalPoints = static_cast<int>(m_optPoints.size());
+    output.totalPoints = !m_optPoints.empty()
+                             ? static_cast<int>(m_optPoints.size())
+                             : (output.sparseCloud ? static_cast<int>(output.sparseCloud->size()) : 0);
 
     // ── 保存相机参数到 cameramatrix.txt ──
     if (!m_config.imageFiles.isEmpty()) {
@@ -665,35 +674,191 @@ void ReconstructionPipeline::exportPointCloud(const QString &filePath)
     exportPointCloud(filePath, m_lastOutput);
 }
 
-void ReconstructionPipeline::saveProject(const QString &filePath,
-                                         const ReconstructionOutput &output)
+bool ReconstructionPipeline::saveProject(QString *error)
 {
-    (void)output;
+    const auto fail = [error](const QString &msg) {
+        if (error) *error = msg;
+        return false;
+    };
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        log(QString("无法保存项目: %1").arg(filePath));
-        return;
+    if (m_config.projectPath.isEmpty() || m_config.projectName.isEmpty())
+        return fail(QStringLiteral("未打开项目，无法保存"));
+
+    // 结果子目录（clouds/ 由阶段保存的 resolveProjectFilePath 创建）
+    QDir(m_config.projectPath).mkpath(QStringLiteral("cameras"));
+    QDir(m_config.projectPath).mkpath(QStringLiteral("matches"));
+
+    ProjectManifest m;
+    m.name = m_config.projectName;
+    m.createdAt = m_manifest.name == m_config.projectName
+                      ? m_manifest.createdAt
+                      : QDateTime::currentDateTime();
+    m.modifiedAt = QDateTime::currentDateTime();
+    m.imageFiles = m_config.imageFiles;
+    m.descriptorType = m_config.descriptorType;
+    m.descriptorParams = m_config.descriptorParams;
+    m.matcherType = m_config.matcherType;
+    m.matcherParams = m_config.matcherParams;
+    m.fixCameraMatrix = m_config.fixCameraMatrix;
+    if (m_config.fixCameraMatrix && !m_config.cameraMatrix.empty()) {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                m.cameraMatrix.push_back(m_config.cameraMatrix.at<double>(r, c));
     }
 
-    QJsonObject root;
-    QJsonArray imageArray;
-    for (const auto &img : m_config.imageFiles) {
-        imageArray.append(img);
+    // ── 点云（m_lastOutput 非空时覆盖保存，与阶段中保存路径一致）──
+    saveStageCloud(m_lastOutput.sparseCloud,
+                   resolveProjectFilePath("clouds/sparse.ply"), "项目保存");
+    if (m_lastOutput.denseCloud && !m_lastOutput.denseCloud->empty()) {
+        saveStageCloud(m_lastOutput.denseCloud,
+                       resolveProjectFilePath("clouds/dense.ply"), "项目保存");
+        m.denseCloudPath = QStringLiteral("clouds/dense.ply");
     }
-    root["images"] = imageArray;
-    root["totalPoints"] = output.totalPoints;
 
-    QJsonDocument doc(root);
-    file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
+    m.totalPoints = m_lastOutput.totalPoints;
+    m.reprojectionError = m_lastOutput.reprojectionError;
+    m.totalElapsedMs = m_lastOutput.totalElapsedMs;
 
-    log(QString("项目已保存至: %1").arg(filePath));
+    // ── 相机参数 ──
+    QString err;
+    if (!m_cameraPoses.empty()) {
+        if (!ProjectStore::writeCameraPoses(
+                m_config.projectPath + "/cameras/poses.json",
+                m_cameraPoses, m_config.imageFiles, &err))
+            return fail(err);
+    }
+
+    // ── 匹配对（密集重建续算输入）──
+    if (!m_matchPairs.empty()) {
+        if (!ProjectStore::writeMatchPairs(
+                m_config.projectPath + "/matches/pairs.bin",
+                m_matchPairs, &err))
+            return fail(err);
+    }
+
+    // ── 清单 ──
+    if (!ProjectStore::writeManifest(m_config.projectPath, m, &err))
+        return fail(err);
+
+    m_manifest = m;
+    log(QString("[项目] 已保存: %1").arg(m_config.projectPath));
+    return true;
 }
 
-void ReconstructionPipeline::saveProject(const QString &filePath)
+bool ReconstructionPipeline::loadProject(const QString &path, QString *error)
 {
-    saveProject(filePath, m_lastOutput);
+    const auto fail = [error](const QString &msg) {
+        if (error) *error = msg;
+        return false;
+    };
+
+    // 兼容传入清单文件或项目目录两种形式
+    QString projectDir = path;
+    QString projectName;
+    const QFileInfo info(path);
+    if (info.isFile()) {
+        projectDir = info.absolutePath();
+        projectName = info.completeBaseName();
+    } else {
+        projectName = ProjectStore::findManifestName(projectDir);
+    }
+    if (projectName.isEmpty())
+        return fail(QStringLiteral("未找到 .sfmproj 清单: %1").arg(path));
+
+    ProjectManifest m;
+    QString err;
+    if (!ProjectStore::readManifest(projectDir, projectName, &m, &err))
+        return fail(err);
+
+    // ── 恢复配置（图像/算法参数/项目信息）──
+    m_config.imageFiles = m.imageFiles;
+    m_config.projectPath = projectDir;
+    m_config.projectName = m.name;
+    m_config.descriptorType = m.descriptorType;
+    m_config.descriptorParams = m.descriptorParams;
+    m_config.matcherType = m.matcherType;
+    m_config.matcherParams = m.matcherParams;
+    m_config.fixCameraMatrix = m.fixCameraMatrix;
+    m_config.cameraMatrix = cv::Mat();
+    if (m.cameraMatrix.size() == 9) {
+        m_config.cameraMatrix = cv::Mat(3, 3, CV_64F);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                m_config.cameraMatrix.at<double>(r, c) = m.cameraMatrix[r * 3 + c];
+    }
+
+    // ── 重置运行状态 ──
+    m_sparseReady = false;
+    m_stopRequested = false;
+    m_cameraPoses.clear();
+    m_matchPairs.clear();
+    m_features.clear();
+    m_optPoints.clear();
+    m_K = cv::Mat();
+    m_lastOutput = ReconstructionOutput();
+    m_manifest = m;
+
+    // ── 恢复相机位姿（密集续算的关键状态）──
+    std::vector<CameraPose> poses;
+    if (!m.cameraPosesPath.isEmpty()) {
+        if (!ProjectStore::readCameraPoses(projectDir + "/" + m.cameraPosesPath,
+                                           &poses, &err))
+            log(QString("[项目] 警告: %1").arg(err));
+    }
+    if (!poses.empty()) {
+        m_cameraPoses = std::move(poses);
+        m_sparseReady = true;
+        for (const auto &pose : m_cameraPoses) {
+            if (pose.registered && !pose.K.empty()) {
+                m_K = pose.K.clone();
+                break;
+            }
+        }
+    }
+
+    // ── 恢复匹配对 ──
+    if (!m.matchPairsPath.isEmpty()) {
+        std::vector<MatchPair> pairs;
+        if (!ProjectStore::readMatchPairs(projectDir + "/" + m.matchPairsPath,
+                                          &pairs, &err))
+            log(QString("[项目] 警告: %1").arg(err));
+        else
+            m_matchPairs = std::move(pairs);
+    }
+
+    // ── 加载点云（显示坐标系 y-up）──
+    if (!m.sparseCloudPath.isEmpty()) {
+        const QString plyPath = projectDir + "/" + m.sparseCloudPath;
+        if (QFileInfo::exists(plyPath)) {
+            try {
+                pcl::io::loadPLYFile(plyPath.toStdString(),
+                                           *m_lastOutput.sparseCloud);
+            } catch (const std::exception &e) {
+                log(QString("[项目] 稀疏点云加载失败: %1").arg(e.what()));
+            }
+        }
+    }
+    if (!m.denseCloudPath.isEmpty()) {
+        const QString plyPath = projectDir + "/" + m.denseCloudPath;
+        if (QFileInfo::exists(plyPath)) {
+            try {
+                pcl::io::loadPLYFile(plyPath.toStdString(),
+                                           *m_lastOutput.denseCloud);
+            } catch (const std::exception &e) {
+                log(QString("[项目] 密集点云加载失败: %1").arg(e.what()));
+            }
+        }
+    }
+
+    m_lastOutput.cameraPoses = m_cameraPoses;
+    m_lastOutput.totalPoints = m.totalPoints;
+    m_lastOutput.reprojectionError = m.reprojectionError;
+    m_lastOutput.totalElapsedMs = m.totalElapsedMs;
+
+    log(QString("[项目] 已打开: %1（%2 张图像, 稀疏 %3 点）")
+            .arg(projectDir).arg(m.imageFiles.size())
+            .arg(m_lastOutput.sparseCloud ? static_cast<int>(m_lastOutput.sparseCloud->size()) : 0));
+    return true;
 }
 
 void ReconstructionPipeline::log(const QString &message)
@@ -761,5 +926,8 @@ QString ReconstructionPipeline::resolveProjectFilePath(const QString &fileName) 
                                  ? QFileInfo(m_config.imageFiles[0]).absolutePath()
                                  : QString());
     if (saveDir.isEmpty()) return QString();
-    return saveDir + "/" + fileName;
+    const QString path = saveDir + "/" + fileName;
+    // fileName 可含子目录（如 clouds/sparse.ply），确保父目录存在
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    return path;
 }

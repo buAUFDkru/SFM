@@ -62,6 +62,12 @@ void ControlButtons::setupUI()
 void ControlButtons::setRunning(bool running)
 {
     m_running = running;
-    m_startBtn->setEnabled(!running);
+    m_startBtn->setEnabled(!running && m_startEnabled);
     m_stopBtn->setEnabled(running);
+}
+
+void ControlButtons::setStartEnabled(bool enabled)
+{
+    m_startEnabled = enabled;
+    m_startBtn->setEnabled(enabled && !m_running);
 }

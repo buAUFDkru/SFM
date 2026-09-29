@@ -24,6 +24,9 @@ public:
     /// 设置当前运行状态：running=true 时禁用开始按钮、启用停止按钮
     void setRunning(bool running);
 
+    /// 独立控制开始按钮可用性（如未加载项目时禁用）
+    void setStartEnabled(bool enabled);
+
 signals:
     void startClicked();
     void stopClicked();
@@ -34,6 +37,7 @@ private:
     QPushButton *m_startBtn = nullptr;
     QPushButton *m_stopBtn = nullptr;
     bool m_running = false;
+    bool m_startEnabled = true;  ///< 项目可用性门控（与运行状态共同决定开始按钮）
 };
 
 #endif // CONTROLBUTTONS_H

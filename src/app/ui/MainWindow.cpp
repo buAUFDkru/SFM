@@ -4,27 +4,40 @@
  *
  * 界面框架：ConfigPanel | PointCloudWidget | LogConsole 三分栏。
  * 重建在 PipelineRunner 工作线程执行，信号经 QueuedConnection 回到 UI 线程。
+ *
+ * 项目管理：菜单"文件"提供新建/打开/保存/最近打开；
+ * 重建完成后自动保存点云、相机参数、匹配对与清单到项目目录。
  */
 
 #include "MainWindow.h"
 #include "ConfigPanel.h"
 #include "DenseReconstructionDialog.h"
 #include "LogWidget/LogConsole.h"
+#include "NewProjectDialog.h"
 #include "ViewWidget/PointCloudWidget.h"
 
 #include <QAction>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QThread>
 
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
+
+namespace {
+constexpr char kRecentProjectsKey[] = "recentProjects";
+constexpr int kMaxRecentProjects = 8;
+} // namespace
 
 MainWindow::MainWindow(const QString &pluginsDir, QWidget *parent)
     : QMainWindow(parent)
@@ -40,6 +53,7 @@ MainWindow::MainWindow(const QString &pluginsDir, QWidget *parent)
     setupStatusBar();
     setupCentralWidget();
     connectSignals();
+    updateRecentMenu();
 }
 
 MainWindow::~MainWindow()
@@ -64,23 +78,23 @@ int MainWindow::currentImageCount() const
     return m_configPanel ? m_configPanel->imageCount() : 0;
 }
 
-void MainWindow::setImageFilesForTest(const QStringList &files)
+void MainWindow::setProjectForTest(const QString &dir, const QStringList &files)
 {
-    if (m_configPanel)
-        m_configPanel->setImageFiles(files);
-}
-
-void MainWindow::setProjectPathForTest(const QString &path)
-{
-    if (m_configPanel)
-        m_configPanel->setProjectPath(path);
+    m_projectDir = dir;
+    m_projectName = QFileInfo(dir).fileName();
+    m_configPanel->setProjectSummary(m_projectName,
+                                     tr("%1 张图像").arg(files.size()));
+    m_configPanel->setProjectLoaded(true);
+    m_configPanel->setImageFiles(files);
+    markDirty();
 }
 
 void MainWindow::runPipelineSyncForTest()
 {
     if (!m_pipeline)
         m_pipeline = new ReconstructionPipeline();   // 注：非 QObject，无父对象
-    ReconstructionConfig cfg = m_configPanel->gatherConfig();
+    applyConfigToPipeline();
+    ReconstructionConfig cfg = m_pipeline->config();
     // 预设密集方法，避免 execute() 在稀疏阶段后阻塞等待 UI 选择
     cfg.denseReconstructionMethod = QStringLiteral("StereoSGBM");
     cfg.denseReconstructionParams = {
@@ -92,13 +106,32 @@ void MainWindow::runPipelineSyncForTest()
         {QStringLiteral("maxDepth"), 50.0},
     };
     m_pipeline->setConfig(cfg);
-    m_pipeline->execute();
+    ReconstructionOutput output = m_pipeline->execute();
+
+    // 与 UI 路径（onPipelineFinished）保持一致：重建成功后自动保存项目
+    if (output.sparseCloud && !output.sparseCloud->empty() && !m_projectDir.isEmpty()) {
+        m_pipeline->saveProject();
+        m_dirty = false;
+        updateTitle();
+    }
 }
 
 void MainWindow::setupMenuBar()
 {
     // ── 文件 ──
     QMenu *fileMenu = menuBar()->addMenu(tr("文件(&F)"));
+
+    QAction *newProj = fileMenu->addAction(tr("新建项目(&N)..."));
+    newProj->setShortcut(QKeySequence::New);
+    connect(newProj, &QAction::triggered, this, &MainWindow::onCreateProject);
+
+    QAction *openProj = fileMenu->addAction(tr("打开项目(&O)..."));
+    openProj->setShortcut(QKeySequence::Open);
+    connect(openProj, &QAction::triggered, this, &MainWindow::onOpenProject);
+
+    m_recentMenu = fileMenu->addMenu(tr("最近打开(&T)"));
+
+    fileMenu->addSeparator();
 
     QAction *importImg = fileMenu->addAction(tr("导入图像(&I)..."));
     importImg->setShortcut(QKeySequence("Ctrl+I"));
@@ -109,13 +142,13 @@ void MainWindow::setupMenuBar()
 
     fileMenu->addSeparator();
 
+    QAction *saveProj = fileMenu->addAction(tr("保存项目(&S)"));
+    saveProj->setShortcut(QKeySequence::Save);
+    connect(saveProj, &QAction::triggered, this, &MainWindow::onSaveProjectFile);
+
     QAction *exportPc = fileMenu->addAction(tr("导出点云(&E)..."));
     exportPc->setShortcut(QKeySequence("Ctrl+E"));
     connect(exportPc, &QAction::triggered, this, &MainWindow::onExportPointCloud);
-
-    QAction *saveProj = fileMenu->addAction(tr("保存工程(&S)..."));
-    saveProj->setShortcut(QKeySequence("Ctrl+S"));
-    connect(saveProj, &QAction::triggered, this, &MainWindow::onSaveProjectFile);
 
     fileMenu->addSeparator();
 
@@ -203,12 +236,252 @@ void MainWindow::connectSignals()
             this, &MainWindow::onStartReconstruction);
     connect(m_configPanel, &ConfigPanel::stopRequested,
             this, &MainWindow::onStopReconstruction);
+    connect(m_configPanel, &ConfigPanel::configChanged,
+            this, &MainWindow::markDirty);
+}
+
+// ═══════════════════════════ 项目管理 ═══════════════════════════
+
+bool MainWindow::ensureProjectOperationAllowed()
+{
+    if (m_pipelineRunner && m_pipelineRunner->isRunning()) {
+        QMessageBox::information(this, tr("项目"),
+                                 tr("重建正在进行中，请等待完成或停止后再操作。"));
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::onCreateProject()
+{
+    if (!ensureProjectOperationAllowed())
+        return;
+
+    NewProjectDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    // 释放旧管线状态（新建项目从零开始）
+    onStopReconstruction();
+    delete m_pipelineRunner;
+    m_pipelineRunner = nullptr;
+    delete m_pipeline;
+    m_pipeline = nullptr;
+
+    const QString dir = dlg.projectDir();
+    QDir().mkpath(dir);
+
+    m_projectDir = dir;
+    m_projectName = dlg.projectName();
+
+    if (!m_configPanel) {
+        m_logConsole->appendError(tr("界面尚未初始化"));
+        return;
+    }
+    m_configPanel->setImageFiles(dlg.imageFiles());  // 自动检测 cameramatrix.txt
+    m_configPanel->setProjectSummary(m_projectName,
+                                     tr("%1 张图像").arg(dlg.imageFiles().size()));
+    m_configPanel->setProjectLoaded(true);
+
+    markDirty();
+    m_logConsole->appendInfo(tr("[项目] 已创建: %1（%2 张图像）")
+                                 .arg(dir).arg(dlg.imageFiles().size()));
+}
+
+void MainWindow::onOpenProject()
+{
+    if (!ensureProjectOperationAllowed())
+        return;
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("打开项目"), QString(),
+        tr("SFM 项目 (*.sfmproj);;所有文件 (*)"));
+    if (path.isEmpty())
+        return;
+
+    openProject(path);
+}
+
+bool MainWindow::openProject(const QString &manifestPath)
+{
+    onStopReconstruction();
+    delete m_pipelineRunner;
+    m_pipelineRunner = nullptr;
+
+    if (!m_pipeline)
+        m_pipeline = new ReconstructionPipeline();
+
+    QString error;
+    if (!m_pipeline->loadProject(manifestPath, &error)) {
+        QMessageBox::warning(this, tr("打开项目"), tr("打开项目失败：\n%1").arg(error));
+        return false;
+    }
+
+    const ProjectManifest &m = m_pipeline->manifest();
+    m_projectDir = QFileInfo(manifestPath).absolutePath();
+    m_projectName = m.name;
+
+    // 恢复 UI：先恢复固定内参，再设置图像列表（其内自动检测会被固定内参覆盖保护）
+    const ReconstructionConfig &cfg = m_pipeline->config();
+    m_configPanel->setFixedCameraMatrix(cfg.cameraMatrix, cfg.fixCameraMatrix);
+    m_configPanel->setAlgorithms(m.descriptorType, m.descriptorParams,
+                                 m.matcherType, m.matcherParams);
+    m_configPanel->setImageFiles(m.imageFiles);
+    m_configPanel->setProjectSummary(m_projectName,
+                                     tr("%1 张图像").arg(m.imageFiles.size()));
+    m_configPanel->setProjectLoaded(true);
+
+    // 图像缺失检查：影响完整重建，不影响查看与密集续算
+    QStringList missing;
+    for (const QString &f : m.imageFiles) {
+        if (!QFile::exists(f))
+            missing << f;
+    }
+    if (!missing.isEmpty()) {
+        QMessageBox::warning(this, tr("打开项目"),
+                             tr("%1 张图像不存在（已被移动或删除），无法重新执行完整重建。\n"
+                                "例如：%2")
+                                 .arg(missing.size())
+                                 .arg(missing.first()));
+        m_logConsole->appendWarning(
+            tr("[项目] %1 张图像路径失效，完整重建不可用").arg(missing.size()));
+    }
+
+    // 显示已保存的点云（稠密优先，其次稀疏）
+    loadAndDisplayCloudFromOutput();
+
+    addToRecentProjects(QFileInfo(manifestPath).absoluteFilePath());
+    m_dirty = false;
+    updateTitle();
+
+    m_logConsole->appendInfo(tr("[项目] 已打开: %1").arg(m_projectDir));
+    return true;
+}
+
+void MainWindow::onSaveProjectFile()
+{
+    if (!ensureProjectOperationAllowed())
+        return;
+
+    if (m_projectDir.isEmpty() || !m_pipeline) {
+        QMessageBox::information(this, tr("保存项目"), tr("未打开项目。"));
+        return;
+    }
+
+    applyConfigToPipeline();  // 同步面板上最新的算法参数与图像列表
+    QString error;
+    if (m_pipeline->saveProject(&error)) {
+        m_dirty = false;
+        updateTitle();
+        m_logConsole->appendInfo(tr("[项目] 已保存: %1").arg(m_projectDir));
+    } else {
+        QMessageBox::warning(this, tr("保存项目"), tr("保存失败：\n%1").arg(error));
+    }
+}
+
+void MainWindow::updateTitle()
+{
+    if (m_projectName.isEmpty()) {
+        setWindowTitle(QStringLiteral("SFM Reconstructor v3.0 — 特征重建"));
+        setWindowModified(false);
+    } else {
+        setWindowTitle(QStringLiteral("%1 — SFM Reconstructor v3.0[*]")
+                           .arg(m_projectName));
+        setWindowModified(m_dirty);
+    }
+}
+
+void MainWindow::markDirty()
+{
+    if (!m_dirty) {
+        m_dirty = true;
+        updateTitle();
+    }
+}
+
+void MainWindow::addToRecentProjects(const QString &manifestPath)
+{
+    QSettings settings;
+    QStringList list = settings.value(QLatin1String(kRecentProjectsKey)).toStringList();
+    list.removeAll(manifestPath);
+    list.prepend(manifestPath);
+    while (list.size() > kMaxRecentProjects)
+        list.removeLast();
+    settings.setValue(QLatin1String(kRecentProjectsKey), list);
+    updateRecentMenu();
+}
+
+void MainWindow::updateRecentMenu()
+{
+    if (!m_recentMenu)
+        return;
+    m_recentMenu->clear();
+
+    QSettings settings;
+    const QStringList list =
+        settings.value(QLatin1String(kRecentProjectsKey)).toStringList();
+    for (const QString &path : list) {
+        if (!QFileInfo::exists(path))
+            continue;
+        QAction *act = m_recentMenu->addAction(
+            QFileInfo(path).completeBaseName());
+        act->setToolTip(path);
+        const QString p = path;
+        connect(act, &QAction::triggered, this, [this, p]() {
+            if (ensureProjectOperationAllowed())
+                openProject(p);
+        });
+    }
+    if (m_recentMenu->isEmpty())
+        m_recentMenu->addAction(tr("（空）"))->setEnabled(false);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (m_dirty && !m_projectDir.isEmpty()) {
+        const QMessageBox::StandardButton ret = QMessageBox::question(
+            this, tr("关闭"),
+            tr("项目“%1”有未保存的修改，是否保存？").arg(m_projectName),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+        if (ret == QMessageBox::Cancel) {
+            event->ignore();
+            return;
+        }
+        if (ret == QMessageBox::Save) {
+            applyConfigToPipeline();
+            QString error;
+            if (!m_pipeline || !m_pipeline->saveProject(&error)) {
+                QMessageBox::warning(this, tr("保存项目"),
+                                     tr("保存失败：\n%1").arg(error));
+                event->ignore();
+                return;
+            }
+        }
+    }
+    event->accept();
+}
+
+// ═══════════════════════════ 重建控制 ═══════════════════════════
+
+void MainWindow::applyConfigToPipeline()
+{
+    if (!m_pipeline)
+        return;
+    ReconstructionConfig cfg = m_configPanel->gatherConfig();
+    cfg.projectPath = m_projectDir;
+    cfg.projectName = m_projectName;
+    m_pipeline->setConfig(cfg);
 }
 
 void MainWindow::onStartReconstruction()
 {
     if (m_pipelineRunner && m_pipelineRunner->isRunning())
         return;
+
+    if (m_projectDir.isEmpty()) {
+        QMessageBox::information(this, tr("重建"), tr("请先创建或打开项目。"));
+        return;
+    }
 
     onStopReconstruction();
     delete m_pipelineRunner;
@@ -217,15 +490,9 @@ void MainWindow::onStartReconstruction()
     m_pipeline = nullptr;
 
     m_pipeline = new ReconstructionPipeline();   // 注：非 QObject，无父对象
-    m_pipeline->setConfig(m_configPanel->gatherConfig());
+    applyConfigToPipeline();
 
     m_pipelineRunner = new PipelineRunner(m_pipeline, this);
-
-    const QString projectPath = m_configPanel->projectPath();
-    const QString saveDir = !projectPath.isEmpty()
-                                ? projectPath
-                                : QCoreApplication::applicationDirPath() + "/output";
-    m_pipelineRunner->setAutoSaveDirectory(saveDir);
 
     connect(m_pipelineRunner, &PipelineRunner::progressChanged,
             this, &MainWindow::onPipelineProgress);
@@ -302,18 +569,6 @@ void MainWindow::onExportPointCloud()
     }
 }
 
-void MainWindow::onSaveProjectFile()
-{
-    const QString filePath = QFileDialog::getSaveFileName(
-        this, tr("保存工程"), QString(), tr("SFM 工程文件 (*.json);;所有文件 (*)"));
-    if (filePath.isEmpty())
-        return;
-    if (m_pipeline) {
-        m_pipeline->saveProject(filePath);
-        m_logConsole->appendInfo(tr("工程已保存: %1").arg(filePath));
-    }
-}
-
 void MainWindow::onImportImages()
 {
     const QStringList files = QFileDialog::getOpenFileNames(
@@ -329,6 +584,8 @@ void MainWindow::onImportDirectory()
     if (!dir.isEmpty())
         m_configPanel->setImageDirectory(dir);
 }
+
+// ═══════════════════════════ 管线回调 ═══════════════════════════
 
 void MainWindow::onPipelineProgress(const QString &stage, int percent)
 {
@@ -349,8 +606,23 @@ void MainWindow::onPipelineFinished(bool success)
 {
     m_threadLabel->setText(tr("线程: 0"));
     m_statusLabel->setText(success ? tr("重建完成") : tr("重建失败"));
-    if (success)
-        loadAndDisplayCloudFromOutput();
+    if (!success)
+        return;
+
+    loadAndDisplayCloudFromOutput();
+
+    // 自动保存项目结果（点云 + 相机参数 + 匹配对 + 清单）
+    if (!m_projectDir.isEmpty() && m_pipeline) {
+        QString error;
+        if (m_pipeline->saveProject(&error)) {
+            m_dirty = false;
+            updateTitle();
+            m_logConsole->appendInfo(tr("[项目] 结果已自动保存: %1").arg(m_projectDir));
+        } else {
+            m_logConsole->appendError(
+                tr("[项目] 自动保存失败: %1").arg(error));
+        }
+    }
 }
 
 void MainWindow::onStagePointCloudReady(const QVector<float> &points,

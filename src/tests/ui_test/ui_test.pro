@@ -23,6 +23,7 @@ SOURCES += \
     ../../app/ui/ConfigPanel.cpp \
     ../../app/ui/ControlButtons.cpp \
     ../../app/ui/DenseReconstructionDialog.cpp \
+    ../../app/ui/NewProjectDialog.cpp \
     ../../app/ui/LogWidget/LogConsole.cpp \
     ../../app/ui/ParamWidget/ParamFormGenerator.cpp \
     ../../app/ui/ParamWidget/AlgorithmComboPanel.cpp \
@@ -33,6 +34,7 @@ HEADERS += \
     ../../app/ui/ConfigPanel.h \
     ../../app/ui/ControlButtons.h \
     ../../app/ui/DenseReconstructionDialog.h \
+    ../../app/ui/NewProjectDialog.h \
     ../../app/ui/LogWidget/LogConsole.h \
     ../../app/ui/ParamWidget/ParamFormGenerator.h \
     ../../app/ui/ParamWidget/AlgorithmComboPanel.h \

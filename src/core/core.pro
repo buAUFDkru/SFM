@@ -39,7 +39,8 @@ HEADERS += \
     pipeline/PatchMatchReconstructor.h \
     pipeline/ReconstructionPipeline.h \
     pipeline/ReconstructionWorker.h \
-    pipeline/PipelineRunner.h
+    pipeline/PipelineRunner.h \
+    pipeline/ProjectStore.h
 
 SOURCES += \
     plugin/PluginRegistry.cpp \
@@ -59,4 +60,5 @@ SOURCES += \
     pipeline/PatchMatchReconstructor.cpp \
     pipeline/ReconstructionPipeline.cpp \
     pipeline/ReconstructionWorker.cpp \
-    pipeline/PipelineRunner.cpp
+    pipeline/PipelineRunner.cpp \
+    pipeline/ProjectStore.cpp
