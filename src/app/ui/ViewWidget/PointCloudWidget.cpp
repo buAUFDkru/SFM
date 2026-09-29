@@ -10,13 +10,18 @@
 
 #include "PointCloudWidget.h"
 
+#include <QImageReader>
 #include <QMouseEvent>
+#include <QOpenGLTexture>
+#include <QThreadPool>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
+/// 缩略图最长边像素（纹理上限，控制显存与加载耗时）
+constexpr int kThumbMaxSize = 256;
 } // namespace
 
 PointCloudWidget::PointCloudWidget(QWidget *parent)
@@ -24,6 +29,8 @@ PointCloudWidget::PointCloudWidget(QWidget *parent)
     , m_backgroundColor(Qt::black)
 {
     setFocusPolicy(Qt::StrongFocus);
+    connect(this, &PointCloudWidget::frustaThumbnailReady,
+            this, &PointCloudWidget::onFrustaThumbnailReady);
     resetView();
 }
 
@@ -38,8 +45,16 @@ PointCloudWidget::~PointCloudWidget()
         glDeleteVertexArrays(1, &m_lineVao);
     if (m_lineVbo)
         glDeleteBuffers(1, &m_lineVbo);
+    if (m_quadVao)
+        glDeleteVertexArrays(1, &m_quadVao);
+    if (m_quadVbo)
+        glDeleteBuffers(1, &m_quadVbo);
+    for (QOpenGLTexture *tex : m_frustaTextures)
+        delete tex;
     if (m_shaderProgram)
         glDeleteProgram(m_shaderProgram);
+    if (m_quadShaderProgram)
+        glDeleteProgram(m_quadShaderProgram);
     doneCurrent();
 }
 
@@ -108,23 +123,8 @@ void PointCloudWidget::initializeGL()
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_PROGRAM_POINT_SIZE);
 
-    if (!initShaders()) {
-        qWarning("[PointCloudWidget] 着色器初始化失败");
-        return;
-    }
-
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glGenVertexArrays(1, &m_lineVao);
-    glGenBuffers(1, &m_lineVbo);
-
-    updateBuffers();
-    updateLineBuffers();
-}
-
-bool PointCloudWidget::initShaders()
-{
-    const char *vertexShaderSource = R"(
+    m_shaderProgram = createProgram(
+        R"(
         #version 330 core
         layout(location = 0) in vec3 aPos;
         layout(location = 1) in vec3 aColor;
@@ -138,9 +138,8 @@ bool PointCloudWidget::initShaders()
             gl_PointSize = pointSize;
             vColor = (monoColor == 1) ? vec3(0.9, 0.9, 0.9) : aColor;
         }
-    )";
-
-    const char *fragmentShaderSource = R"(
+        )",
+        R"(
         #version 330 core
         in vec3 vColor;
         out vec4 FragColor;
@@ -148,11 +147,55 @@ bool PointCloudWidget::initShaders()
         {
             FragColor = vec4(vColor, 1.0);
         }
-    )";
+        )");
+    if (!m_shaderProgram) {
+        qWarning("[PointCloudWidget] 点云着色器初始化失败");
+        return;
+    }
 
-    // 折线着色器复用同一着色器（line 顶点颜色单独提供）
+    // 缩略图四边形着色器（独立 program，attribute 1 为 UV 而非颜色）
+    m_quadShaderProgram = createProgram(
+        R"(
+        #version 330 core
+        layout(location = 0) in vec3 aPos;
+        layout(location = 1) in vec2 aUV;
+        uniform mat4 mvp;
+        out vec2 vUV;
+        void main()
+        {
+            gl_Position = mvp * vec4(aPos, 1.0);
+            vUV = aUV;
+        }
+        )",
+        R"(
+        #version 330 core
+        in vec2 vUV;
+        uniform sampler2D frustaTex;
+        out vec4 FragColor;
+        void main()
+        {
+            FragColor = texture(frustaTex, vUV);
+        }
+        )");
+    if (!m_quadShaderProgram)
+        qWarning("[PointCloudWidget] 缩略图着色器初始化失败（仅影响缩略图显示）");
+
+    glGenVertexArrays(1, &m_vao);
+    glGenBuffers(1, &m_vbo);
+    glGenVertexArrays(1, &m_lineVao);
+    glGenBuffers(1, &m_lineVbo);
+    glGenVertexArrays(1, &m_quadVao);
+    glGenBuffers(1, &m_quadVbo);
+
+    updateBuffers();
+    updateLineBuffers();
+    updateQuadBuffers();
+}
+
+GLuint PointCloudWidget::createProgram(const char *vertexSrc, const char *fragmentSrc)
+{
     GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, nullptr);
+    glShaderSource(vertexShader, 1, &vertexSrc, nullptr);
     glCompileShader(vertexShader);
 
     GLint success = 0;
@@ -162,11 +205,11 @@ bool PointCloudWidget::initShaders()
         glGetShaderInfoLog(vertexShader, 512, nullptr, log);
         qWarning("[PointCloudWidget] 顶点着色器编译失败: %s", log);
         glDeleteShader(vertexShader);
-        return false;
+        return 0;
     }
 
     GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, nullptr);
+    glShaderSource(fragmentShader, 1, &fragmentSrc, nullptr);
     glCompileShader(fragmentShader);
 
     glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
@@ -176,27 +219,28 @@ bool PointCloudWidget::initShaders()
         qWarning("[PointCloudWidget] 片段着色器编译失败: %s", log);
         glDeleteShader(vertexShader);
         glDeleteShader(fragmentShader);
-        return false;
+        return 0;
     }
 
-    m_shaderProgram = glCreateProgram();
-    glAttachShader(m_shaderProgram, vertexShader);
-    glAttachShader(m_shaderProgram, fragmentShader);
-    glLinkProgram(m_shaderProgram);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
 
-    glGetProgramiv(m_shaderProgram, GL_LINK_STATUS, &success);
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
     if (!success) {
         char log[512];
-        glGetProgramInfoLog(m_shaderProgram, 512, nullptr, log);
+        glGetProgramInfoLog(program, 512, nullptr, log);
         qWarning("[PointCloudWidget] 着色器程序链接失败: %s", log);
+        glDeleteProgram(program);
         glDeleteShader(vertexShader);
         glDeleteShader(fragmentShader);
-        return false;
+        return 0;
     }
 
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
-    return true;
+    return program;
 }
 
 void PointCloudWidget::resizeGL(int w, int h)
@@ -243,6 +287,37 @@ void PointCloudWidget::paintGL()
         glBindVertexArray(m_lineVao);
         glDrawArrays(GL_LINES, 0, m_lineVertices.size() / 3);
         glBindVertexArray(0);
+    }
+
+    // 相机缩略图四边形（逐相机绘制；待上传缩略图在此惰性创建纹理）
+    if (m_frustaVisible && m_quadShaderProgram && m_quadVertexCount > 0) {
+        glUseProgram(m_quadShaderProgram);
+        GLint quadMvpLoc = glGetUniformLocation(m_quadShaderProgram, "mvp");
+        glUniformMatrix4fv(quadMvpLoc, 1, GL_FALSE, mvp.constData());
+        GLint texLoc = glGetUniformLocation(m_quadShaderProgram, "frustaTex");
+        glUniform1i(texLoc, 0);
+        glActiveTexture(GL_TEXTURE0);
+        const int quads = m_quadVertexCount / 6;
+        for (int i = 0; i < quads; ++i) {
+            // 惰性纹理上传：paintGL 时上下文必然已初始化
+            if (!m_frustaTextures.value(i)
+                && i < m_frustaPendingTextures.size()
+                && !m_frustaPendingTextures[i].isNull()) {
+                m_frustaTextures[i] = new QOpenGLTexture(m_frustaPendingTextures[i]);
+                m_frustaTextures[i]->setMinMagFilters(QOpenGLTexture::Linear,
+                                                      QOpenGLTexture::Linear);
+                m_frustaTextures[i]->setWrapMode(QOpenGLTexture::ClampToEdge);
+                m_frustaPendingTextures[i] = QImage();
+            }
+            if (!m_frustaTextures.value(i))
+                continue;
+            glBindVertexArray(m_quadVao);
+            m_frustaTextures[i]->bind();
+            glDrawArrays(GL_TRIANGLES, i * 6, 6);
+            m_frustaTextures[i]->release();
+        }
+        glBindVertexArray(0);
+        glUseProgram(m_shaderProgram);   // 恢复点/线着色器
     }
 }
 
@@ -316,25 +391,160 @@ void PointCloudWidget::updateLineBuffers()
 // ── 相机位姿金字塔 ──
 
 void PointCloudWidget::setCameraFrusta(const QVector<float> &lineVertices,
-                                       const QVector<float> &lineColors)
+                                       const QVector<float> &lineColors,
+                                       const QVector<QVector3D> &quadCorners,
+                                       const QStringList &imagePaths)
 {
+    // 递增任务代数：作废仍在后台加载的旧缩略图任务
+    ++m_frustaGeneration;
+
     m_lineVertices = lineVertices;
     m_lineColors = lineColors;
     updateLineBuffers();
+
+    // 缩略图四边形：替换纹理数组并重建顶点缓冲
+    qDeleteAll(m_frustaTextures);
+    m_frustaTextures.clear();
+    m_frustaPendingTextures.clear();
+    const int cameraCount = quadCorners.size() / 4;
+    const bool hasImages = cameraCount > 0 && imagePaths.size() == cameraCount;
+    if (hasImages) {
+        m_frustaQuadCorners = quadCorners;
+        m_frustaImagePaths = imagePaths;
+        m_frustaTextures.resize(cameraCount);
+        m_frustaTextures.fill(nullptr);
+    } else {
+        m_frustaQuadCorners.clear();
+        m_frustaImagePaths.clear();
+    }
+    updateQuadBuffers();
+
+    if (hasImages)
+        startThumbnailLoading();
     update();
 }
 
 void PointCloudWidget::clearCameraFrusta()
 {
-    m_lineVertices.clear();
-    m_lineColors.clear();
-    updateLineBuffers();
+    ++m_frustaGeneration;
+    qDeleteAll(m_frustaTextures);
+    m_frustaTextures.clear();
+    m_frustaPendingTextures.clear();
+    m_frustaQuadCorners.clear();
+    m_frustaImagePaths.clear();
+    m_quadVertexCount = 0;
+    updateQuadBuffers();
     update();
 }
 
 void PointCloudWidget::setCameraFrustaVisible(bool visible)
 {
     m_frustaVisible = visible;
+    update();
+}
+
+int PointCloudWidget::loadedFrustaTextureCount() const
+{
+    int count = 0;
+    for (const QOpenGLTexture *tex : m_frustaTextures) {
+        if (tex)
+            ++count;
+    }
+    return count;
+}
+
+int PointCloudWidget::pendingFrustaTextureCount() const
+{
+    int count = 0;
+    for (const QImage &img : m_frustaPendingTextures) {
+        if (!img.isNull())
+            ++count;
+    }
+    return count;
+}
+
+void PointCloudWidget::updateQuadBuffers()
+{
+    makeCurrent();
+    if (!m_quadVao || !m_quadVbo) {
+        doneCurrent();
+        return;
+    }
+
+    // 交错顶点 pos(3)+uv(2)，每相机 6 顶点；UV 按从场景侧看正立的方向：
+    // 观察者面朝 -z 时其"右"为相机系 -x、"上"为相机系 -y，
+    // 故左上=c1(+x,-y)、右上=c0(-x,-y)、右下=c3(-x,+y)、左下=c2(+x,+y)
+    QVector<float> interleaved;
+    interleaved.reserve(m_frustaImagePaths.size() * 6 * 5);
+    const float uv[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+    for (int i = 0; i < m_frustaImagePaths.size(); ++i) {
+        const QVector3D c[4] = {
+            m_frustaQuadCorners.at(i * 4 + 0), m_frustaQuadCorners.at(i * 4 + 1),
+            m_frustaQuadCorners.at(i * 4 + 2), m_frustaQuadCorners.at(i * 4 + 3)};
+        // 顶点次序（uv 见上）：c1, c0, c3,  c1, c3, c2
+        const QVector3D verts[6] = {c[1], c[0], c[3], c[1], c[3], c[2]};
+        for (int v = 0; v < 6; ++v) {
+            interleaved << verts[v].x() << verts[v].y() << verts[v].z()
+                        << uv[v][0] << uv[v][1];
+        }
+    }
+
+    m_quadVertexCount = interleaved.size() / 5;
+
+    glBindVertexArray(m_quadVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_quadVbo);
+    glBufferData(GL_ARRAY_BUFFER, interleaved.size() * sizeof(float),
+                 interleaved.isEmpty() ? nullptr : interleaved.constData(),
+                 GL_STATIC_DRAW);
+    if (m_quadVertexCount > 0) {
+        constexpr int stride = 5 * sizeof(float);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(0));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<void *>(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    doneCurrent();
+}
+
+void PointCloudWidget::startThumbnailLoading()
+{
+    const int generation = m_frustaGeneration;
+    for (int i = 0; i < m_frustaImagePaths.size(); ++i) {
+        const QString path = m_frustaImagePaths.at(i);
+        const int index = i;
+        if (path.isEmpty())
+            continue;
+        QThreadPool::globalInstance()->start([this, generation, index, path]() {
+            QImageReader reader(path);
+            reader.setAutoTransform(true);
+            const QImage img = reader.read();
+            if (img.isNull())
+                return;
+            const QImage thumb =
+                img.scaled(kThumbMaxSize, kThumbMaxSize,
+                           Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (thumb.isNull())
+                return;
+            emit frustaThumbnailReady(generation, index, thumb);
+        });
+    }
+}
+
+void PointCloudWidget::onFrustaThumbnailReady(int generation, int index, const QImage &image)
+{
+    // 数据已被替换（新项目/新金字塔），丢弃过期结果
+    if (generation != m_frustaGeneration || index >= m_frustaImagePaths.size())
+        return;
+
+    // 只缓存 QImage，纹理推迟到 paintGL 中创建（彼时上下文必然可用），
+    // 避免在未显示/未初始化 GL 的 widget 上 makeCurrent 导致崩溃
+    if (m_frustaPendingTextures.size() < m_frustaImagePaths.size())
+        m_frustaPendingTextures.resize(m_frustaImagePaths.size());
+    m_frustaPendingTextures[index] = image;
     update();
 }
 

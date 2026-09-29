@@ -412,6 +412,60 @@ private slots:
         // 非法深度返回空
         CHECK_UI(MainWindow::cameraFrustumLines(poses, -1.0f).isEmpty(), "负深度返回空");
     }
+
+    /// 缩略图：几何四角/图像路径对应 + widget 异步纹理加载
+    void cameraFrustumThumbnails()
+    {
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录创建");
+        const QStringList files = {dir.filePath(QStringLiteral("a.png")),
+                                   dir.filePath(QStringLiteral("b.png"))};
+        QImage img(32, 24, QImage::Format_RGB32);
+        img.fill(Qt::red);
+        CHECK_UI(img.save(files[0]), "测试图像 A 保存");
+        img.fill(Qt::green);
+        CHECK_UI(img.save(files[1]), "测试图像 B 保存");
+
+        std::vector<CameraPose> poses;
+        CameraPose p0;
+        p0.imageId = 0;
+        p0.imageWidth = 640;
+        p0.imageHeight = 480;
+        p0.registered = true;
+        p0.R = cv::Mat::eye(3, 3, CV_64F);
+        p0.t = (cv::Mat_<double>(3, 1) << 0.0, 0.0, -2.0);
+        poses.push_back(p0);
+
+        const auto geom = MainWindow::cameraFrustumGeometry(poses, 1.0f, files);
+        CHECK_UI(geom.lines.size() == 48, "单相机线框 48 float");
+        CHECK_UI(geom.quadCorners.size() == 4, "单相机底面 4 角点");
+        CHECK_UI(geom.imagePaths.size() == 1 && geom.imagePaths[0] == files[0],
+                 "图像路径与 imageId 对应");
+
+        // imageId 越界 → 空路径
+        const auto geomOob = MainWindow::cameraFrustumGeometry(poses, 1.0f, {});
+        CHECK_UI(geomOob.imagePaths.size() == 1 && geomOob.imagePaths[0].isEmpty(),
+                 "imageId 越界时路径为空");
+
+        // widget 异步加载缩略图：offscreen 平台无 GL 渲染，纹理创建（paintGL 惰性上传）
+        // 不会发生，故断言"待上传缓存"计数验证异步加载与信号投递链路
+        PointCloudWidget w;
+        QVector<float> lineCols(geom.lines.size(), 1.0f);
+        w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners, geom.imagePaths);
+        QTest::qWait(2000);
+        CHECK_UI(w.pendingFrustaTextureCount() == 1, "缩略图异步加载进入待上传队列");
+
+        // 无效路径 → 不产生待上传图像且不崩溃
+        w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners,
+                          QStringList{QStringLiteral("Z:/not_exist.png")});
+        QTest::qWait(1000);
+        CHECK_UI(w.pendingFrustaTextureCount() == 0, "无效路径不产生待上传图像");
+
+        // quadCorners 与 imagePaths 数量不匹配 → 忽略贴图
+        w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners, {});
+        CHECK_UI(w.pendingFrustaTextureCount() == 0, "数量不匹配忽略贴图");
+        CHECK_UI(w.loadedFrustaTextureCount() == 0, "无渲染时无纹理创建");
+    }
 };
 
 class TestDarkTheme : public QObject

@@ -690,12 +690,13 @@ void MainWindow::loadAndDisplayCloudFromOutput()
     updateCameraFrustaFromOutput();
 }
 
-QVector<float> MainWindow::cameraFrustumLines(const std::vector<CameraPose> &poses,
-                                              float depth)
+CameraFrustumGeometry MainWindow::cameraFrustumGeometry(const std::vector<CameraPose> &poses,
+                                                        float depth,
+                                                        const QStringList &imageFiles)
 {
-    QVector<float> lines;
+    CameraFrustumGeometry geom;
     if (depth <= 0.0f)
-        return lines;
+        return geom;
 
     for (const auto &pose : poses) {
         if (!pose.registered || pose.R.empty() || pose.t.empty())
@@ -715,28 +716,42 @@ QVector<float> MainWindow::cameraFrustumLines(const std::vector<CameraPose> &pos
 
         // 显示坐标系转换：OpenCV y-down → y-up（绕 X 轴 180°，y、z 取反），
         // 与点云组装时的转换一致，否则金字塔与点云错位
-        const auto toDisplay = [](const cv::Mat &v, QVector<float> &out) {
-            out << float(v.at<double>(0))
-                << float(-v.at<double>(1))
-                << float(-v.at<double>(2));
+        const auto toDisplay = [](const cv::Mat &v) {
+            return QVector3D(float(v.at<double>(0)),
+                             float(-v.at<double>(1)),
+                             float(-v.at<double>(2)));
         };
 
-        QVector<float> center;
-        toDisplay(C, center);
-        QVector<float> corners[4];
+        const QVector3D center = toDisplay(C);
+        QVector3D corners[4];
         for (int i = 0; i < 4; ++i) {
             const cv::Mat v = Rt * (cv::Mat_<double>(3, 1) << camCorners[i][0],
                                     camCorners[i][1], camCorners[i][2]) + C;
-            toDisplay(v, corners[i]);
+            corners[i] = toDisplay(v);
+            geom.quadCorners << corners[i];
         }
 
+        const auto appendSegment = [&geom](const QVector3D &a, const QVector3D &b) {
+            geom.lines << a.x() << a.y() << a.z() << b.x() << b.y() << b.z();
+        };
         // 光心 → 四角（4 条）+ 底面四边（4 条）
         for (int i = 0; i < 4; ++i)
-            lines << center << corners[i];
+            appendSegment(center, corners[i]);
         for (int i = 0; i < 4; ++i)
-            lines << corners[i] << corners[(i + 1) % 4];
+            appendSegment(corners[i], corners[(i + 1) % 4]);
+
+        // 图像路径（imageId 越界视为无图）
+        geom.imagePaths << (pose.imageId >= 0 && pose.imageId < imageFiles.size()
+                                ? imageFiles.at(pose.imageId)
+                                : QString());
     }
-    return lines;
+    return geom;
+}
+
+QVector<float> MainWindow::cameraFrustumLines(const std::vector<CameraPose> &poses,
+                                              float depth)
+{
+    return cameraFrustumGeometry(poses, depth, {}).lines;
 }
 
 void MainWindow::updateCameraFrustaFromOutput()
@@ -765,18 +780,20 @@ void MainWindow::updateCameraFrustaFromOutput()
             depth = 1.0f;
     }
 
-    const QVector<float> frusta = cameraFrustumLines(output.cameraPoses, depth);
-    if (frusta.isEmpty()) {
+    const QStringList imageFiles = m_pipeline->config().imageFiles;
+    const CameraFrustumGeometry geom = cameraFrustumGeometry(output.cameraPoses, depth, imageFiles);
+    if (geom.lines.isEmpty()) {
         m_pointCloudWidget->clearCameraFrusta();
         return;
     }
 
     // 青色线框，与点云形成对比
     QVector<float> frustaColors;
-    frustaColors.reserve(frusta.size());
-    for (int i = 0; i < frusta.size() / 3; ++i)
+    frustaColors.reserve(geom.lines.size());
+    for (int i = 0; i < geom.lines.size() / 3; ++i)
         frustaColors << 0.30f << 0.85f << 1.00f;
-    m_pointCloudWidget->setCameraFrusta(frusta, frustaColors);
+    m_pointCloudWidget->setCameraFrusta(geom.lines, frustaColors,
+                                        geom.quadCorners, geom.imagePaths);
 }
 
 void MainWindow::onResetView()

@@ -15,6 +15,14 @@ class QLabel;
 class QMenu;
 class QSplitter;
 
+/// 相机金字塔几何数据（线框 + 底面四角 + 对应图像路径）
+struct CameraFrustumGeometry
+{
+    QVector<float> lines;               ///< 线框成对端点（显示坐标系 y-up）
+    QVector<QVector3D> quadCorners;     ///< 每相机 4 个底面角（缩略图贴图用）
+    QStringList imagePaths;             ///< 每相机对应图像路径（未注册/越界为空串）
+};
+
 /**
  * @brief SFM Reconstructor 主窗口
  *
@@ -47,8 +55,13 @@ public:
     /// 同步执行一次完整重建并将结果存入 lastOutput（测试自检用，阻塞直至完成）
     void runPipelineSyncForTest();
 
-    /// 相机位姿 → 金字塔线框顶点（成对端点，显示坐标系 y-up；depth 为金字塔深度。
-    /// 测试自检用，也供 loadAndDisplayCloudFromOutput 调用）
+    /// 相机位姿 → 金字塔几何（线框 + 底面四角 + 图像路径，显示坐标系 y-up；
+    /// depth 为金字塔深度，测试自检用，也供 updateCameraFrustaFromOutput 调用）
+    static CameraFrustumGeometry cameraFrustumGeometry(const std::vector<CameraPose> &poses,
+                                                       float depth,
+                                                       const QStringList &imageFiles);
+
+    /// 仅线框顶点（cameraFrustumGeometry 的便捷封装，测试自检用）
     static QVector<float> cameraFrustumLines(const std::vector<CameraPose> &poses,
                                              float depth);
 

@@ -2,13 +2,17 @@
 #define POINTCLOUDWIDGET_H
 
 #include <QColor>
+#include <QImage>
 #include <QMatrix4x4>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLWidget>
 #include <QPoint>
 #include <QQuaternion>
+#include <QStringList>
 #include <QVector>
 #include <QVector3D>
+
+class QOpenGLTexture;
 
 /**
  * @brief 三维点云渲染控件
@@ -72,15 +76,35 @@ public slots:
     /// 线框模式开关（点云无几何拓扑，此处仅作为渲染状态占位）
     void setWireframeMode(bool enabled);
 
-    /// 设置相机位姿金字塔线框（成对线段端点 x,y,z 与对应 RGB 颜色，替换现有内容）
+    /// 设置相机位姿金字塔线框（成对线段端点 x,y,z 与对应 RGB 颜色，替换现有内容）。
+    /// quadCorners：每相机 4 个底面角（相机系顺序 (-x,-y)(+x,-y)(+x,+y)(-x,+y)，
+    /// 展开 4 项/相机），与 imagePaths 一一对应时异步加载图像缩略图贴到底面
+    /// （UV 按从场景侧看正立的方向）。imagePaths 为空串的项不贴图。
     void setCameraFrusta(const QVector<float> &lineVertices,
-                         const QVector<float> &lineColors);
+                         const QVector<float> &lineColors,
+                         const QVector<QVector3D> &quadCorners = {},
+                         const QStringList &imagePaths = {});
 
-    /// 清空相机位姿金字塔
+    /// 清空相机位姿金字塔（含缩略图纹理）
     void clearCameraFrusta();
 
     /// 相机金字塔显示开关
     void setCameraFrustaVisible(bool visible);
+
+    /// 已成功加载缩略图纹理的相机数量（测试自检用）
+    int loadedFrustaTextureCount() const;
+
+    /// 已接收、待 paintGL 上传的缩略图数量（测试自检用；offscreen 平台无渲染，
+    /// 纹理创建不会发生，用此计数验证异步加载链路）
+    int pendingFrustaTextureCount() const;
+
+private slots:
+    /// 后台缩略图加载完成（generation 校验防止旧任务回写到已替换的数据）
+    void onFrustaThumbnailReady(int generation, int index, const QImage &image);
+
+signals:
+    /// 缩略图在工作线程加载完成后发射（经队列连接回主线程上传纹理）
+    void frustaThumbnailReady(int generation, int index, const QImage &image);
 
 protected:
     void initializeGL() override;
@@ -93,9 +117,11 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
-    bool initShaders();
+    GLuint createProgram(const char *vertexSrc, const char *fragmentSrc);
     void updateBuffers();
     void updateLineBuffers();
+    void updateQuadBuffers();
+    void startThumbnailLoading();
     void updateModelViewMatrix();
     void fitToData();
     void recomputeBBox();
@@ -112,6 +138,18 @@ private:
     QVector<float> m_lineVertices;
     QVector<float> m_lineColors;
     bool m_frustaVisible = true;
+
+    // 相机缩略图四边形（GL_TRIANGLES，顶点交错 pos3+uv2；独立纹理着色器）
+    GLuint m_quadShaderProgram = 0;
+    GLuint m_quadVao = 0;
+    GLuint m_quadVbo = 0;
+    int m_quadVertexCount = 0;                  // 6 顶点/相机
+    QVector<QVector3D> m_frustaQuadCorners;     // 每相机 4 个底面角（显示系）
+    QStringList m_frustaImagePaths;             // 每相机对应图像路径（空串不贴图）
+    QVector<QImage> m_frustaPendingTextures;    // 待上传缩略图（paintGL 中创建纹理，
+                                                // 避免在未初始化 GL 上下文时跨线程上传）
+    QVector<QOpenGLTexture *> m_frustaTextures; // 与相机序一致，未加载为 nullptr
+    int m_frustaGeneration = 0;                 // 异步加载任务代数，替换数据时递增
 
     QMatrix4x4 m_projection;
     QMatrix4x4 m_modelView;
