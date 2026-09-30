@@ -7,6 +7,7 @@
 #include "ParamFormGenerator.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -14,6 +15,25 @@
 
 #include "plugin/ISfmPlugin.h"
 #include "plugin/PluginRegistry.h"
+
+namespace {
+
+/// 拦截 QComboBox 本体的滚轮事件：参数表单内滚动滚轮应滚动页面而非切换算法，
+/// 仅点击下拉展开后才能切换（弹出列表自身的滚轮浏览不受影响）
+class ComboWheelFilter : public QObject
+{
+public:
+    explicit ComboWheelFilter(QObject *parent) : QObject(parent) {}
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Wheel)
+            return true;
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+} // namespace
 
 AlgorithmComboPanel::AlgorithmComboPanel(const QString &category,
                                          PluginRegistry *registry,
@@ -31,6 +51,8 @@ AlgorithmComboPanel::AlgorithmComboPanel(const QString &category,
     auto *row = new QHBoxLayout();
     row->addWidget(new QLabel(tr("算法:"), box));
     m_algoCombo = new QComboBox(box);
+    // 滚轮不切换算法（以 combo 为 parent，随其销毁）
+    m_algoCombo->installEventFilter(new ComboWheelFilter(m_algoCombo));
     row->addWidget(m_algoCombo, 1);
     v->addLayout(row);
 

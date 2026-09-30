@@ -23,6 +23,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include "plugin/ParamSchema.h"
 #include "plugin/PluginRegistry.h"
@@ -294,6 +295,39 @@ private slots:
                      QStringLiteral("切换到 %1").arg(id).toLocal8Bit().constData());
             CHECK_UI(!collect.value(QStringLiteral("params")).toObject().isEmpty(),
                      QStringLiteral("%1 参数表单非空").arg(id).toLocal8Bit().constData());
+        }
+    }
+
+    /// 回归：算法下拉框不响应滚轮（参数表单内滚动应滚动页面，点击展开才能切换）
+    void comboWheelDoesNotSwitch()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        AlgorithmComboPanel descPanel(QStringLiteral("descriptor"), &reg, QStringLiteral("描述符"));
+        AlgorithmComboPanel matchPanel(QStringLiteral("matcher"), &reg, QStringLiteral("匹配器"));
+
+        for (AlgorithmComboPanel *panel : {&descPanel, &matchPanel}) {
+            QComboBox *combo = panel->findChild<QComboBox *>();
+            CHECK_UI(combo != nullptr, "算法下拉框存在");
+            if (!combo || combo->count() < 2)
+                continue;
+            const int before = combo->currentIndex();
+
+            // 模拟鼠标滚轮（正向滚动一格）
+            QWheelEvent wheelUp(QPointF(5, 5), QPointF(combo->mapToGlobal(QPoint(5, 5))),
+                                QPoint(0, 120), QPoint(0, 120), Qt::NoButton,
+                                Qt::NoModifier, Qt::ScrollUpdate, false);
+            QCoreApplication::sendEvent(combo, &wheelUp);
+            QWheelEvent wheelDown(QPointF(5, 5), QPointF(combo->mapToGlobal(QPoint(5, 5))),
+                                  QPoint(0, -120), QPoint(0, -120), Qt::NoButton,
+                                  Qt::NoModifier, Qt::ScrollUpdate, false);
+            QCoreApplication::sendEvent(combo, &wheelDown);
+            CHECK_UI(combo->currentIndex() == before, "滚轮不切换算法");
+
+            // 点击/程序化切换仍有效（setCurrentIndex 不走滚轮路径）
+            const int other = (before + 1) % combo->count();
+            combo->setCurrentIndex(other);
+            CHECK_UI(combo->currentIndex() == other, "程序化切换仍有效");
+            combo->setCurrentIndex(before);
         }
     }
 
