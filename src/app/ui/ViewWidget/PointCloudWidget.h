@@ -79,7 +79,7 @@ public slots:
     /// 设置相机位姿金字塔线框（成对线段端点 x,y,z 与对应 RGB 颜色，替换现有内容）。
     /// quadCorners：每相机 4 个底面角（相机系顺序 (-x,-y)(+x,-y)(+x,+y)(-x,+y)，
     /// 展开 4 项/相机），与 imagePaths 一一对应时异步加载图像缩略图贴到底面
-    /// （UV 按从场景侧看正立的方向）。imagePaths 为空串的项不贴图。
+    /// （UV 按从光心沿光轴看向底面时图像正立的方向）。imagePaths 为空串的项不贴图。
     void setCameraFrusta(const QVector<float> &lineVertices,
                          const QVector<float> &lineColors,
                          const QVector<QVector3D> &quadCorners = {},

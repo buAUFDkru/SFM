@@ -471,9 +471,9 @@ void PointCloudWidget::updateQuadBuffers()
         return;
     }
 
-    // 交错顶点 pos(3)+uv(2)，每相机 6 顶点；UV 按从场景侧看正立的方向：
-    // 观察者面朝 -z 时其"右"为相机系 -x、"上"为相机系 -y，
-    // 故左上=c1(+x,-y)、右上=c0(-x,-y)、右下=c3(-x,+y)、左下=c2(+x,+y)
+    // 交错顶点 pos(3)+uv(2)，每相机 6 顶点；UV 按从光心沿光轴（+z）看向底面时
+    // 图像正立的方向（针孔模型）：图像左 = 相机系 -x、图像上 = 相机系 -y，
+    // 故左上=c0(-x,-y)、右上=c1(+x,-y)、右下=c2(+x,+y)、左下=c3(-x,+y)
     QVector<float> interleaved;
     interleaved.reserve(m_frustaImagePaths.size() * 6 * 5);
     const float uv[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
@@ -481,8 +481,8 @@ void PointCloudWidget::updateQuadBuffers()
         const QVector3D c[4] = {
             m_frustaQuadCorners.at(i * 4 + 0), m_frustaQuadCorners.at(i * 4 + 1),
             m_frustaQuadCorners.at(i * 4 + 2), m_frustaQuadCorners.at(i * 4 + 3)};
-        // 顶点次序（uv 见上）：c1, c0, c3,  c1, c3, c2
-        const QVector3D verts[6] = {c[1], c[0], c[3], c[1], c[3], c[2]};
+        // 顶点次序（uv 见上）：c0, c1, c2,  c0, c2, c3
+        const QVector3D verts[6] = {c[0], c[1], c[2], c[0], c[2], c[3]};
         for (int v = 0; v < 6; ++v) {
             interleaved << verts[v].x() << verts[v].y() << verts[v].z()
                         << uv[v][0] << uv[v][1];
