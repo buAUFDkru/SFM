@@ -357,6 +357,14 @@ ReconstructionOutput ReconstructionPipeline::execute()
         // 坐标系转换：OpenCV y-down → 显示系（绕Y轴旋转180°，x、z取反，y保持；
         // det=+1 刚体旋转，方向经实测与真实地理对齐）
         for (auto &pt : sparsePCL->points) { pt.x = -pt.x; pt.z = -pt.z; }
+
+        // 稀疏完成即写入 lastOutput：UI 收到 sparse 阶段点云信号后
+        // 可立即显示相机位姿金字塔（密集阶段不写 m_lastOutput，
+        // 最终组装的 m_lastOutput = output 为同值覆盖）
+        m_lastOutput.sparseCloud = sparsePCL;
+        m_lastOutput.cameraPoses = cameraPoses;
+        m_lastOutput.totalPoints = static_cast<int>(m_optPoints.size());
+
         emitStageCloud(sparsePCL, "sparse");
         // 保存稀疏点云到项目目录（显示坐标系）
         saveStageCloud(sparsePCL, resolveProjectFilePath("clouds/sparse.ply"), "稀疏重建");

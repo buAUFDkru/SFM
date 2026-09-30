@@ -648,6 +648,9 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
     m_logConsole->appendInfo(tr("[%1] 阶段点云: %2 点")
                                  .arg(stageName).arg(points.size() / 3));
     m_pointCloudWidget->updatePointCloud(points, colors, true);
+
+    // 阶段点云就绪即同步相机位姿金字塔（稀疏完成时 lastOutput 已含位姿）
+    updateCameraFrustaFromOutput();
 }
 
 void MainWindow::updateStatusLabel()
