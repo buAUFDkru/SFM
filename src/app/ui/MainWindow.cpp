@@ -191,8 +191,10 @@ void MainWindow::setupMenuBar()
     QAction *frusta = viewMenu->addAction(tr("显示相机位姿(&P)"));
     frusta->setCheckable(true);
     frusta->setChecked(true);
+    m_frustaAction = frusta;
     connect(frusta, &QAction::toggled, this, [this](bool enabled) {
         m_pointCloudWidget->setCameraFrustaVisible(enabled);
+        m_configPanel->setCameraFrustaChecked(enabled);
     });
 
     // ── 帮助 ──
@@ -250,6 +252,14 @@ void MainWindow::connectSignals()
             this, &MainWindow::onStopReconstruction);
     connect(m_configPanel, &ConfigPanel::configChanged,
             this, &MainWindow::markDirty);
+    connect(m_configPanel, &ConfigPanel::denseReconstructionRequested,
+            this, &MainWindow::onDenseReconstruction);
+    connect(m_configPanel, &ConfigPanel::cameraFrustaVisibleChanged,
+            this, [this](bool visible) {
+                m_pointCloudWidget->setCameraFrustaVisible(visible);
+                if (m_frustaAction)
+                    m_frustaAction->setChecked(visible);
+            });
 }
 
 // ═══════════════════════════ 项目管理 ═══════════════════════════
@@ -294,6 +304,7 @@ void MainWindow::onCreateProject()
     m_configPanel->setProjectSummary(m_projectName,
                                      tr("%1 张图像").arg(dlg.imageFiles().size()));
     m_configPanel->setProjectLoaded(true);
+    m_configPanel->resetResults();
 
     markDirty();
     m_logConsole->appendInfo(tr("[项目] 已创建: %1（%2 张图像）")
@@ -346,6 +357,12 @@ bool MainWindow::openProject(const QString &manifestPath)
     m_configPanel->setProjectSummary(m_projectName,
                                      tr("%1 张图像").arg(m.imageFiles.size()));
     m_configPanel->setProjectLoaded(true);
+
+    // 回填结果区（清单统计 + 已保存的密集点云）
+    m_configPanel->setSparseResult(m.totalPoints);
+    if (m_pipeline->lastOutput().denseCloud && !m_pipeline->lastOutput().denseCloud->empty())
+        m_configPanel->setDenseResult(
+            static_cast<int>(m_pipeline->lastOutput().denseCloud->size()));
 
     // 图像缺失检查：影响完整重建，不影响查看与密集续算
     QStringList missing;
@@ -533,6 +550,7 @@ void MainWindow::onStartReconstruction()
 
     m_statusLabel->setText(tr("重建中..."));
     m_threadLabel->setText(tr("线程: 1"));
+    m_configPanel->setRunning(true);
     m_pipelineRunner->start();
 }
 
@@ -540,6 +558,7 @@ void MainWindow::onStopReconstruction()
 {
     if (m_pipelineRunner)
         m_pipelineRunner->stop();
+    m_configPanel->setRunning(false);
     m_statusLabel->setText(tr("已停止"));
 }
 
@@ -570,6 +589,7 @@ void MainWindow::onDenseReconstruction()
     }
 
     m_statusLabel->setText(tr("密集重建: %1").arg(config.denseReconstructionMethod));
+    m_configPanel->setRunning(true);
     m_pipelineRunner->startDenseReconstruction();
 }
 
@@ -622,10 +642,17 @@ void MainWindow::onPipelineFinished(bool success)
 {
     m_threadLabel->setText(tr("线程: 0"));
     m_statusLabel->setText(success ? tr("重建完成") : tr("重建失败"));
+    m_configPanel->setRunning(false);
     if (!success)
         return;
 
     loadAndDisplayCloudFromOutput();
+
+    // 密集点云就绪则追加结果行（稀疏行已由阶段信号设置）
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &dense =
+        m_pipeline ? m_pipeline->lastOutput().denseCloud : nullptr;
+    if (dense && !dense->empty())
+        m_configPanel->setDenseResult(static_cast<int>(dense->size()));
 
     // 自动保存项目结果（点云 + 相机参数 + 匹配对 + 清单）
     if (!m_projectDir.isEmpty() && m_pipeline) {
@@ -651,6 +678,10 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
 
     // 阶段点云就绪即同步相机位姿金字塔（稀疏完成时 lastOutput 已含位姿）
     updateCameraFrustaFromOutput();
+
+    // 稀疏完成：显示结果区并折叠任务区（密集继续在后台进行）
+    if (stageName == QStringLiteral("sparse") && m_pipeline)
+        m_configPanel->setSparseResult(m_pipeline->lastOutput().totalPoints);
 }
 
 void MainWindow::updateStatusLabel()

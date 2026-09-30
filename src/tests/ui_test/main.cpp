@@ -12,9 +12,11 @@
 
 #include <QtTest>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QGroupBox>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -505,6 +507,71 @@ private slots:
     }
 };
 
+/// ConfigPanel 上下文状态：结果区/任务区折叠/运行锁定/相机开关
+class TestConfigPanelStates : public QObject
+{
+    Q_OBJECT
+private slots:
+    void sparseResultCollapsesTask()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        ConfigPanel panel(&reg);
+        auto *taskBody = panel.findChild<QWidget *>(QStringLiteral("taskBody"));
+        auto *resultBox = panel.findChild<QGroupBox *>(QStringLiteral("resultBox"));
+        CHECK_UI(taskBody != nullptr && taskBody->isVisibleTo(&panel), "任务区初始展开");
+        CHECK_UI(resultBox != nullptr && !resultBox->isVisibleTo(&panel), "结果区初始隐藏");
+
+        panel.setSparseResult(1234);
+        CHECK_UI(taskBody && !taskBody->isVisibleTo(&panel), "稀疏完成后任务区折叠");
+        CHECK_UI(resultBox && resultBox->isVisibleTo(&panel), "稀疏完成后结果区显示");
+        const QList<QLabel *> labels = resultBox->findChildren<QLabel *>();
+        CHECK_UI(labels.size() >= 2 && labels[0]->text().contains(QStringLiteral("1234")),
+                 "稀疏结果点数文本");
+
+        panel.setDenseResult(5678);
+        CHECK_UI(labels.size() >= 2 && labels[1]->isVisibleTo(&panel) &&
+                     labels[1]->text().contains(QStringLiteral("5678")), "密集结果行");
+
+        panel.resetResults();
+        CHECK_UI(taskBody && taskBody->isVisibleTo(&panel), "重置后任务区展开");
+        CHECK_UI(resultBox && !resultBox->isVisibleTo(&panel), "重置后结果区隐藏");
+    }
+
+    void runningLocksTask()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        ConfigPanel panel(&reg);
+        panel.setProjectLoaded(true);
+        const QList<AlgorithmComboPanel *> algos =
+            panel.findChildren<AlgorithmComboPanel *>();
+        CHECK_UI(algos.size() == 2, "两个算法面板");
+
+        panel.setRunning(true);
+        CHECK_UI(!algos[0]->isEnabled() && !algos[1]->isEnabled(), "运行中算法区锁定");
+        auto *taskBody = panel.findChild<QWidget *>(QStringLiteral("taskBody"));
+        CHECK_UI(taskBody && taskBody->isVisibleTo(&panel), "运行中任务区强制展开");
+
+        panel.setRunning(false);
+        CHECK_UI(algos[0]->isEnabled() && algos[1]->isEnabled(), "结束后解锁");
+    }
+
+    void cameraCheckboxSignal()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        ConfigPanel panel(&reg);
+        QSignalSpy spy(&panel, &ConfigPanel::cameraFrustaVisibleChanged);
+        auto *cb = panel.findChild<QCheckBox *>();
+        CHECK_UI(cb != nullptr && cb->isChecked(), "相机开关默认开");
+
+        cb->setChecked(false);
+        CHECK_UI(spy.count() == 1 && !spy.first().at(0).toBool(), "取消勾选发信号");
+
+        panel.setCameraFrustaChecked(true);
+        CHECK_UI(cb->isChecked(), "程序化同步勾选");
+        CHECK_UI(spy.count() == 1, "程序化同步不发信号");
+    }
+};
+
 class TestDarkTheme : public QObject
 {
     Q_OBJECT
@@ -878,6 +945,7 @@ int main(int argc, char *argv[])
     status |= QTest::qExec(new TestBasicWidgets, argc, argv);
     status |= QTest::qExec(new TestDenseReconstructionDialog, argc, argv);
     status |= QTest::qExec(new TestDarkTheme, argc, argv);
+    status |= QTest::qExec(new TestConfigPanelStates, argc, argv);
     status |= QTest::qExec(new TestProjectStore, argc, argv);
     status |= QTest::qExec(new TestMainWindowSmoke, argc, argv);
 

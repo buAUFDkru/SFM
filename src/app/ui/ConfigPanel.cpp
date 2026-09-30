@@ -1,12 +1,13 @@
 /**
  * @file ConfigPanel.cpp
- * @brief 左侧参数配置面板实现（schema 驱动）
+ * @brief 左侧参数配置面板实现（schema 驱动，上下文化三段式）
  */
 
 #include "ConfigPanel.h"
 #include "ControlButtons.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
 
+#include <QCheckBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -14,9 +15,12 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QTextStream>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "plugin/PluginRegistry.h"
@@ -60,35 +64,82 @@ void ConfigPanel::setupUI()
 
     layout->addWidget(projectBox);
 
-    // ── 描述符算法面板 ──
-    m_descriptor = new AlgorithmComboPanel(QStringLiteral("descriptor"), m_registry,
-                                           tr("特征描述符"), container);
-    layout->addWidget(m_descriptor);
+    // ── 结果区（稀疏完成后显示） ──
+    m_resultBox = new QGroupBox(tr("结果"), container);
+    m_resultBox->setObjectName(QStringLiteral("resultBox"));
+    auto *resultLayout = new QVBoxLayout(m_resultBox);
 
-    QFrame *line1 = new QFrame(container);
+    m_sparseResultLabel = new QLabel(m_resultBox);
+    m_sparseResultLabel->setWordWrap(true);
+    resultLayout->addWidget(m_sparseResultLabel);
+
+    m_denseResultLabel = new QLabel(m_resultBox);
+    m_denseResultLabel->setStyleSheet("color: #888;");
+    m_denseResultLabel->setWordWrap(true);
+    m_denseResultLabel->setVisible(false);
+    resultLayout->addWidget(m_denseResultLabel);
+
+    m_denseButton = new QPushButton(tr("密集重建..."), m_resultBox);
+    connect(m_denseButton, &QPushButton::clicked,
+            this, &ConfigPanel::denseReconstructionRequested);
+    resultLayout->addWidget(m_denseButton);
+
+    m_resultBox->setVisible(false);
+    layout->addWidget(m_resultBox);
+
+    // ── 重建任务区（可折叠：标题按钮 + 内容容器） ──
+    m_taskToggle = new QToolButton(container);
+    m_taskToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_taskToggle->setAutoRaise(true);
+    m_taskToggle->setText(tr("重建任务"));
+    connect(m_taskToggle, &QToolButton::clicked,
+            this, &ConfigPanel::toggleTaskSection);
+    layout->addWidget(m_taskToggle);
+
+    m_taskBody = new QWidget(container);
+    m_taskBody->setObjectName(QStringLiteral("taskBody"));
+    auto *taskLayout = new QVBoxLayout(m_taskBody);
+    taskLayout->setContentsMargins(0, 0, 0, 0);
+    taskLayout->setSpacing(8);
+
+    m_descriptor = new AlgorithmComboPanel(QStringLiteral("descriptor"), m_registry,
+                                           tr("特征描述符"), m_taskBody);
+    taskLayout->addWidget(m_descriptor);
+
+    QFrame *line1 = new QFrame(m_taskBody);
     line1->setFrameShape(QFrame::HLine);
     line1->setFrameShadow(QFrame::Sunken);
-    layout->addWidget(line1);
+    taskLayout->addWidget(line1);
 
-    // ── 匹配器算法面板 ──
     m_matcher = new AlgorithmComboPanel(QStringLiteral("matcher"), m_registry,
-                                        tr("特征匹配器"), container);
-    layout->addWidget(m_matcher);
+                                        tr("特征匹配器"), m_taskBody);
+    taskLayout->addWidget(m_matcher);
+
+    QFrame *line2 = new QFrame(m_taskBody);
+    line2->setFrameShape(QFrame::HLine);
+    line2->setFrameShadow(QFrame::Sunken);
+    taskLayout->addWidget(line2);
+
+    m_controls = new ControlButtons(m_taskBody);
+    taskLayout->addWidget(m_controls);
+
+    layout->addWidget(m_taskBody);
+
+    // ── 显示选项 ──
+    auto *displayBox = new QGroupBox(tr("显示"), container);
+    auto *displayLayout = new QVBoxLayout(displayBox);
+    m_cameraCheck = new QCheckBox(tr("相机位姿金字塔"), displayBox);
+    m_cameraCheck->setChecked(true);
+    connect(m_cameraCheck, &QCheckBox::toggled,
+            this, &ConfigPanel::cameraFrustaVisibleChanged);
+    displayLayout->addWidget(m_cameraCheck);
+    layout->addWidget(displayBox);
 
     // 默认算法选择：描述符 SIFT、匹配器 FLANN。
     // 下拉框填充顺序来自注册表（QHash 无序），必须显式指定默认项。
     // 参数传空对象 → 表单按各插件 paramSchema 的默认值填充。
     m_descriptor->setParams(QStringLiteral("SIFT"), QJsonObject{});
     m_matcher->setParams(QStringLiteral("FLANN"), QJsonObject{});
-
-    QFrame *line2 = new QFrame(container);
-    line2->setFrameShape(QFrame::HLine);
-    line2->setFrameShadow(QFrame::Sunken);
-    layout->addWidget(line2);
-
-    // ── 控制按钮 ──
-    m_controls = new ControlButtons(container);
-    layout->addWidget(m_controls);
 
     layout->addStretch();
 
@@ -101,6 +152,7 @@ void ConfigPanel::setupUI()
 
     // 未加载项目时禁用开始按钮
     setProjectLoaded(false);
+    setTaskSectionExpanded(true);
 }
 
 ReconstructionConfig ConfigPanel::gatherConfig() const
@@ -135,6 +187,66 @@ void ConfigPanel::setProjectLoaded(bool loaded)
 {
     m_projectLoaded = loaded;
     m_controls->setStartEnabled(loaded);
+}
+
+void ConfigPanel::setRunning(bool running)
+{
+    m_running = running;
+    // 运行中锁定算法配置；按钮内部已有运行态门控
+    m_descriptor->setEnabled(!running);
+    m_matcher->setEnabled(!running);
+    m_controls->setRunning(running);
+    if (running)
+        setTaskSectionExpanded(true);   // 运行中必须可见（停止按钮）
+}
+
+void ConfigPanel::setSparseResult(int points)
+{
+    m_sparseResultLabel->setText(tr("稀疏完成: %1 点").arg(points));
+    m_resultBox->setVisible(true);
+    setTaskSectionExpanded(false);   // 完成后自动折叠任务区
+}
+
+void ConfigPanel::setDenseResult(int points)
+{
+    m_denseResultLabel->setText(points >= 0
+                                    ? tr("密集完成: %1 点").arg(points)
+                                    : tr("密集: 已有结果"));
+    m_denseResultLabel->setVisible(true);
+    m_resultBox->setVisible(true);
+}
+
+void ConfigPanel::resetResults()
+{
+    m_resultBox->setVisible(false);
+    m_sparseResultLabel->clear();
+    m_denseResultLabel->setVisible(false);
+    m_denseResultLabel->clear();
+    setTaskSectionExpanded(true);
+}
+
+void ConfigPanel::setCameraFrustaChecked(bool checked)
+{
+    if (m_cameraCheck->isChecked() != checked) {
+        QSignalBlocker blocker(m_cameraCheck);
+        m_cameraCheck->setChecked(checked);
+    }
+}
+
+void ConfigPanel::toggleTaskSection()
+{
+    setTaskSectionExpanded(!m_taskExpanded);
+}
+
+void ConfigPanel::setTaskSectionExpanded(bool expanded)
+{
+    m_taskExpanded = expanded;
+    m_taskBody->setVisible(expanded);
+    m_taskToggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    if (expanded)
+        m_taskToggle->setText(tr("重建任务"));
+    else
+        m_taskToggle->setText(tr("重建任务（已完成，点击展开）"));
 }
 
 void ConfigPanel::setAlgorithms(const QString &descriptorType, const QJsonObject &descriptorParams,

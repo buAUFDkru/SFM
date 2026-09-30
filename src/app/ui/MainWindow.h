@@ -11,6 +11,7 @@ class ConfigPanel;
 class LogConsole;
 class PointCloudWidget;
 class PluginRegistry;
+class QAction;
 class QLabel;
 class QMenu;
 class QSplitter;
@@ -122,6 +123,7 @@ private:
     QLabel *m_statusLabel = nullptr;
     QLabel *m_threadLabel = nullptr;
     QMenu *m_recentMenu = nullptr;
+    QAction *m_frustaAction = nullptr;  ///< 视图菜单"显示相机位姿"（与面板复选框同步）
 
     ReconstructionPipeline *m_pipeline = nullptr;
     PipelineRunner *m_pipelineRunner = nullptr;
