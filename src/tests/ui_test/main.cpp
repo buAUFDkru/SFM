@@ -422,22 +422,22 @@ private slots:
         // 每相机 8 条线段 = 16 个端点 = 48 float
         CHECK_UI(lines.size() == 48, "单相机 8 条线段 16 端点");
 
-        // R=I、t=0 → 世界系 = 相机系；显示系绕 Z 轴转 180°（x、y 取反）。
+        // R=I、t=0 → 世界系 = 相机系；显示系绕 Y 轴转 180°（x、z 取反，y 保持）。
         // 端点顺序：光心(0,0,0) → 角点0（相机系 (-hw,-hh,d)，hw=1, hh=0.75）
-        //   → 显示系角点0 = (1, 0.75, 2)
+        //   → 显示系角点0 = (1, -0.75, -2)
         CHECK_UI(qAbs(lines[0]) < 1e-5f && qAbs(lines[1]) < 1e-5f && qAbs(lines[2]) < 1e-5f,
                  "线段起点为光心（原点）");
-        CHECK_UI(qAbs(lines[3] - 1.0f) < 1e-5f && qAbs(lines[4] - 0.75f) < 1e-5f &&
-                     qAbs(lines[5] - 2.0f) < 1e-5f, "角点经显示系转换正确");
+        CHECK_UI(qAbs(lines[3] - 1.0f) < 1e-5f && qAbs(lines[4] - (-0.75f)) < 1e-5f &&
+                     qAbs(lines[5] - (-2.0f)) < 1e-5f, "角点经显示系转换正确");
 
-        // 光心平移：t=(0,0,-1) → C=-R^T·t=(0,0,1) → 显示系 (0,0,1)（z 轴不变）
+        // 光心平移：t=(0,0,-1) → C=-R^T·t=(0,0,1) → 显示系 (0,0,-1)
         CameraPose pMoved = p;
         pMoved.t = (cv::Mat_<double>(3, 1) << 0.0, 0.0, -1.0);
         poses.push_back(pMoved);
         QVector<float> lines2 = MainWindow::cameraFrustumLines(poses, depth);
         CHECK_UI(lines2.size() == 96, "两相机 16 条线段");
         CHECK_UI(qAbs(lines2[48]) < 1e-5f && qAbs(lines2[49]) < 1e-5f &&
-                     qAbs(lines2[50] - 1.0f) < 1e-5f, "光心世界系→显示系平移正确");
+                     qAbs(lines2[50] - (-1.0f)) < 1e-5f, "光心世界系→显示系平移正确");
 
         // 未注册或矩阵缺失的位姿跳过
         CameraPose pUnreg = p;

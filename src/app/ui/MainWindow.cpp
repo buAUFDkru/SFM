@@ -714,12 +714,12 @@ CameraFrustumGeometry MainWindow::cameraFrustumGeometry(const std::vector<Camera
         const cv::Mat Rt = pose.R.t();
         const cv::Mat C = -Rt * pose.t;   // 光心（世界系）
 
-        // 显示坐标系转换：OpenCV y-down → y-up（绕 Z 轴 180°，x、y 取反），
+        // 显示坐标系转换：OpenCV → 显示系（绕 Y 轴 180°，x、z 取反，y 保持），
         // 与点云组装时的转换一致，否则金字塔与点云错位
         const auto toDisplay = [](const cv::Mat &v) {
             return QVector3D(float(-v.at<double>(0)),
-                             float(-v.at<double>(1)),
-                             float(v.at<double>(2)));
+                             float(v.at<double>(1)),
+                             float(-v.at<double>(2)));
         };
 
         const QVector3D center = toDisplay(C);
