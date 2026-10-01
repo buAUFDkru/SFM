@@ -361,9 +361,10 @@ ReconstructionOutput ReconstructionPipeline::execute()
         // 稀疏完成即写入 lastOutput：UI 收到 sparse 阶段点云信号后
         // 可立即显示相机位姿金字塔（密集阶段不写 m_lastOutput，
         // 最终组装的 m_lastOutput = output 为同值覆盖）
+        // 注意 totalPoints 必须取局部 optPoints——m_optPoints 在此之后才赋值
         m_lastOutput.sparseCloud = sparsePCL;
         m_lastOutput.cameraPoses = cameraPoses;
-        m_lastOutput.totalPoints = static_cast<int>(m_optPoints.size());
+        m_lastOutput.totalPoints = static_cast<int>(optPoints.size());
 
         emitStageCloud(sparsePCL, "sparse");
         // 保存稀疏点云到项目目录（显示坐标系）

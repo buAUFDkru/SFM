@@ -531,10 +531,16 @@ private slots:
         panel.setDenseResult(5678);
         CHECK_UI(labels.size() >= 2 && labels[1]->isVisibleTo(&panel) &&
                      labels[1]->text().contains(QStringLiteral("5678")), "密集结果行");
+        // 密集完成后去掉密集重建按钮
+        auto *denseBtn = resultBox->findChild<QPushButton *>();
+        CHECK_UI(denseBtn != nullptr && !denseBtn->isVisibleTo(&panel),
+                 "密集完成后隐藏密集重建按钮");
 
         panel.resetResults();
         CHECK_UI(taskBody && taskBody->isVisibleTo(&panel), "重置后任务区展开");
         CHECK_UI(resultBox && !resultBox->isVisibleTo(&panel), "重置后结果区隐藏");
+        // resultBox 自身隐藏，按钮以相对 resultBox 的可见性断言恢复
+        CHECK_UI(denseBtn && denseBtn->isVisibleTo(resultBox), "重置后恢复密集重建按钮");
     }
 
     void runningLocksTask()

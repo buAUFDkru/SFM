@@ -128,7 +128,7 @@ void ConfigPanel::setupUI()
     // ── 显示选项 ──
     auto *displayBox = new QGroupBox(tr("显示"), container);
     auto *displayLayout = new QVBoxLayout(displayBox);
-    m_cameraCheck = new QCheckBox(tr("相机位姿金字塔"), displayBox);
+    m_cameraCheck = new QCheckBox(tr("相机"), displayBox);
     m_cameraCheck->setChecked(true);
     connect(m_cameraCheck, &QCheckBox::toggled,
             this, &ConfigPanel::cameraFrustaVisibleChanged);
@@ -214,6 +214,8 @@ void ConfigPanel::setDenseResult(int points)
                                     : tr("密集: 已有结果"));
     m_denseResultLabel->setVisible(true);
     m_resultBox->setVisible(true);
+    // 密集已完成，去掉密集重建入口（重跑走菜单"重建 → 密集重建"）
+    m_denseButton->setVisible(false);
 }
 
 void ConfigPanel::resetResults()
@@ -222,6 +224,7 @@ void ConfigPanel::resetResults()
     m_sparseResultLabel->clear();
     m_denseResultLabel->setVisible(false);
     m_denseResultLabel->clear();
+    m_denseButton->setVisible(true);   // 恢复密集重建入口
     setTaskSectionExpanded(true);
 }
 
