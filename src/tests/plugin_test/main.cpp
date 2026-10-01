@@ -932,6 +932,94 @@ int run(const QString &pluginsDir)
         }
     }
 
+    // ── NearestNeighbor 分块实现回归（跨 tile 边界 + SIMD 距离精度） ──
+    {
+        auto *nnp = reg.matcherPlugin(QStringLiteral("NearestNeighbor"));
+        check(nnp != nullptr, "NearestNeighbor 插件加载（分块回归）");
+        if (nnp) {
+            // 1300×1100（跨 3 行块 × 3 列块，tile=512），前 100 行同源
+            const int m = 1300, n = 1100, d = 32;
+            cv::Mat desc1(m, d, CV_32F), desc2(n, d, CV_32F);
+            cv::RNG rng(20261001u);
+            rng.fill(desc1, cv::RNG::UNIFORM, -1.f, 1.f);
+            desc1.rowRange(0, 100).copyTo(desc2.rowRange(0, 100));
+            cv::Mat noise(n - 100, d, CV_32F);
+            rng.fill(noise, cv::RNG::UNIFORM, -1.f, 1.f);
+            noise.copyTo(desc2.rowRange(100, n));
+
+            auto normalize = [](const cv::Mat &src, cv::Mat &dst) {
+                cv::Mat f;
+                src.convertTo(f, CV_32F);
+                dst = f.clone();
+                for (int i = 0; i < dst.rows; ++i) {
+                    double sq = 0;
+                    for (int j = 0; j < dst.cols; ++j)
+                        sq += double(dst.at<float>(i, j)) * dst.at<float>(i, j);
+                    const float nrm = float(std::sqrt(sq));
+                    if (nrm > 0)
+                        for (int j = 0; j < dst.cols; ++j)
+                            dst.at<float>(i, j) /= nrm;
+                }
+            };
+            cv::Mat f1, f2;
+            normalize(desc1, f1);
+            normalize(desc2, f2);
+
+            // mutual=true：同源 100 对全部找回（自点积恒最大且双向一致），
+            // 且距离与标量参考一致（SIMD 累加顺序差异 < 1e-4）
+            auto w1 = nnp->createWorker(QJsonObject{});
+            std::vector<std::vector<cv::DMatch>> knn;
+            const bool ok1 = w1->knnMatchPair(desc1, desc2, knn, 2);
+            int found = 0;
+            double maxDistErr = 0.0;
+            for (const auto &row : knn) {
+                for (const auto &dm : row) {
+                    if (dm.queryIdx < 100 && dm.trainIdx == dm.queryIdx) {
+                        ++found;
+                        const float cosv = float(f1.row(dm.queryIdx).dot(f2.row(dm.trainIdx)));
+                        const float expect =
+                            std::sqrt(std::max(0.f, 2.f * (1.f - cosv)));
+                        maxDistErr = std::max(maxDistErr,
+                                              std::abs(double(dm.distance) - double(expect)));
+                    }
+                }
+            }
+            check(ok1 && found == 100,
+                  QStringLiteral("分块 NN 同源对找回 %1/100").arg(found));
+            // 自匹配对 cos≈1，sqrt(2(1-cos)) 对 ~1e-7 的浮点累加差有 sqrt 放大
+            // （~5e-4，与既有自匹配 5e-3 阈值同源），故阈值取 1e-3
+            check(maxDistErr < 1e-3,
+                  QStringLiteral("分块 NN 距离精度 maxErr=%1 <1e-3").arg(maxDistErr, 0, 'e', 2));
+
+            // matchPair 与 knnMatchPair(k=1) 拍平一致（复用实现的自一致）
+            std::vector<std::vector<cv::DMatch>> knn1;
+            w1->knnMatchPair(desc1, desc2, knn1, 1);
+            std::vector<cv::DMatch> flat;
+            for (const auto &row : knn1)
+                for (const auto &dm : row)
+                    flat.push_back(dm);
+            std::vector<cv::DMatch> single;
+            w1->matchPair(desc1, desc2, single);
+            bool same = single.size() == flat.size();
+            for (size_t i = 0; i < single.size() && same; ++i) {
+                same = single[i].queryIdx == flat[i].queryIdx &&
+                       single[i].trainIdx == flat[i].trainIdx &&
+                       single[i].distance == flat[i].distance;
+            }
+            check(same, "matchPair 与 knn(k=1) 拍平一致");
+
+            // mutual=false：无反向校验时每行都有 top-1
+            QJsonObject noMutual;
+            noMutual[QStringLiteral("mutualCheck")] = false;
+            auto w2 = nnp->createWorker(noMutual);
+            std::vector<std::vector<cv::DMatch>> knn2;
+            w2->knnMatchPair(desc1, desc2, knn2, 1);
+            check(static_cast<int>(knn2.size()) == m,
+                  QStringLiteral("mutual=false 时输出行数 %1 == %2")
+                      .arg(knn2.size()).arg(m));
+        }
+    }
+
     // ── P3a 共享算法单测 ──
     runThreadPoolTests();
     runSfmLoggerTests();
