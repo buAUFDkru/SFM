@@ -1,13 +1,10 @@
 #include "BuiltinMatchers.h"
 
 #include <QDebug>
-#include <future>
 
 #include <opencv2/core/hal/intrin.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/flann.hpp>
-
-#include "algorithm/ThreadPool.h"
 
 // ── FLANN ───────────────────────────────────────────────────────────────────
 
@@ -249,9 +246,12 @@ inline float nnSimToDistance(float sim)
 // ── 分块加速实现 ────────────────────────────────────────────────────────────
 // 旧实现一次性计算 N1×N2 相似度矩阵（8192² 特征时 256MB）+ 单线程 cv::gemm
 // + 逐列跨行跳步扫描 mutual，三处瓶颈。分块后：
-//   - 相似度只保留 512×512 块缓冲（1MB/线程，L2 友好）
-//   - SIMD 点积 + 行块经全局线程池并行
-//   - mutual 列向 top-1 按行块局部计算后合并（严格大于 → 行号最小优先，与全量扫描一致）
+//   - 相似度只保留 512×512 块缓冲（1MB，L2 友好）
+//   - SIMD 点积提升单核吞吐
+// 注意：NN 内部**不做**行块多线程——MatcherService 已按图像对将任务提交到
+// 全局线程池（外层任务级并行），池 worker 内再向同一池提交行块任务并阻塞
+// 等待会在图像对数 ≥ worker 数时死锁。分块的收益来自 cache 局部性与 SIMD，
+// 总吞吐由外层图像对并行保证。
 
 constexpr int kNnTileRows = 512;
 constexpr int kNnTileCols = 512;
@@ -364,47 +364,27 @@ bool NearestNeighborMatcherWorker::knnMatchPair(const cv::Mat &desc1, const cv::
     const int m = d1n.rows, n = d2n.rows;
     const int kk = std::min(std::max(k, 1), n);
 
-    // 行块调度：前 nTiles-1 块提交全局线程池，最后一块当前线程执行——
-    // 调用方可能本身是池 worker（管线匹配阶段），避免嵌套等待死锁
-    std::vector<int> tileBegin;
-    for (int bi0 = 0; bi0 < m; bi0 += kNnTileRows)
-        tileBegin.push_back(bi0);
-    const int nTiles = static_cast<int>(tileBegin.size());
-
-    std::vector<std::future<NnTileResult>> futures;
-    futures.reserve(std::max(0, nTiles - 1));
-    for (int t = 0; t < nTiles - 1; ++t) {
-        const int bi0 = tileBegin[static_cast<size_t>(t)];
+    // 行块顺序执行（单线程）：并行由 MatcherService 的图像对级任务保证，
+    // 此处嵌套并行会死锁/超订（见上方说明）
+    std::vector<NnTileResult> results;
+    results.reserve(static_cast<size_t>((m + kNnTileRows - 1) / kNnTileRows));
+    for (int bi0 = 0; bi0 < m; bi0 += kNnTileRows) {
         const int bi1 = std::min(bi0 + kNnTileRows, m);
-        futures.push_back(sfm::globalThreadPool().submit(
-            nnMatchRowsTile, std::cref(d1n), std::cref(d2n), bi0, bi1, kk, m_mutualCheck));
+        results.push_back(nnMatchRowsTile(d1n, d2n, bi0, bi1, kk, m_mutualCheck));
     }
 
-    // 收集 + 合并列向 top-1（严格大于 → 先合并的行号小的块优先，与全量扫描一致）
+    // 合并列向 top-1（严格大于 → 先合并的行号小的块优先，与全量扫描一致）
     std::vector<int> globalColBestIdx;
     std::vector<float> globalColBestVal;
     if (m_mutualCheck) {
         globalColBestIdx.assign(static_cast<size_t>(n), -1);
         globalColBestVal.assign(static_cast<size_t>(n), -2.0f);
-    }
-
-    std::vector<NnTileResult> results;
-    results.reserve(static_cast<size_t>(nTiles));
-    for (int t = 0; t < nTiles; ++t) {
-        if (t < nTiles - 1) {
-            results.push_back(futures[static_cast<size_t>(t)].get());
-        } else {
-            const int bi0 = tileBegin[static_cast<size_t>(t)];
-            const int bi1 = std::min(bi0 + kNnTileRows, m);
-            results.push_back(nnMatchRowsTile(d1n, d2n, bi0, bi1, kk, m_mutualCheck));
-        }
-        if (m_mutualCheck) {
-            const auto &cbi = results.back().colBestIdx;
-            const auto &cbv = results.back().colBestVal;
+        for (const auto &res : results) {
             for (int j = 0; j < n; ++j) {
-                if (cbv[static_cast<size_t>(j)] > globalColBestVal[static_cast<size_t>(j)]) {
-                    globalColBestVal[static_cast<size_t>(j)] = cbv[static_cast<size_t>(j)];
-                    globalColBestIdx[static_cast<size_t>(j)] = cbi[static_cast<size_t>(j)];
+                if (res.colBestVal[static_cast<size_t>(j)] >
+                    globalColBestVal[static_cast<size_t>(j)]) {
+                    globalColBestVal[static_cast<size_t>(j)] = res.colBestVal[static_cast<size_t>(j)];
+                    globalColBestIdx[static_cast<size_t>(j)] = res.colBestIdx[static_cast<size_t>(j)];
                 }
             }
         }
