@@ -289,14 +289,19 @@ ReconstructionOutput ReconstructionPipeline::execute()
             .arg(K.at<double>(0, 2), 0, 'f', 2)
             .arg(K.at<double>(1, 2), 0, 'f', 2));
     }
-    InitResult initResult = Initialization::instance()->findInitialPair(m_features, matchPairs, K);
-    if (initResult.score < 0) {
+    // ── 初始化候选：按评分降序取前若干组，逐个尝试 ──
+    //  大视角数据集里评分最高的种子对未必能撑起整个重建（例如恰好选到
+    //  一对共视区域很窄的图像）。多重尝试对应 COLMAP 的 init_max_reg_trials：
+    //  注册出足够多相机即接受，否则换下一组种子对，并保留历史最优结果。
+    const int initMaxTrials = 3;
+    const std::vector<InitResult> initCandidates =
+        Initialization::instance()->findInitialPairCandidates(
+            m_features, matchPairs, K, initMaxTrials);
+    if (initCandidates.empty()) {
         log("错误: 未找到合适的初始化图像对，终止重建");
         return output;
     }
-    log(QString("[初始化] 种子对: 图像 #%1 ↔ #%2, 评分=%3")
-        .arg(initResult.imageId1).arg(initResult.imageId2)
-        .arg(initResult.score, 0, 'f', 4));
+    log(QString("[初始化] 候选种子对: %1 组（将逐个尝试）").arg(initCandidates.size()));
 
     ViewGraph viewGraph = ViewGraph::buildFromPairs(matchPairs, static_cast<int>(m_features.size()));
 
@@ -307,12 +312,60 @@ ReconstructionOutput ReconstructionPipeline::execute()
     setProgress("稀疏重建", 0);
     stageTimer.restart();
 
+    const int numImagesAll = static_cast<int>(m_features.size());
+    const int acceptRegCount = std::max(3, static_cast<int>(0.9 * numImagesAll));
+
     std::vector<Point3D> sparsePoints;
     std::vector<CameraPose> cameraPoses;
-    if (!Triangulate::instance()->triangulate(
-            matchPairs, m_features, initResult, viewGraph, sparsePoints, cameraPoses,
-            m_config.fixCameraMatrix)) {
-        log("错误: 三角测量失败");
+    int bestRegCount = 0;
+    bool sparseOk = false;
+
+    for (size_t t = 0; t < initCandidates.size(); ++t) {
+        const InitResult &initResult = initCandidates[t];
+        log(QString("[初始化] 尝试种子对 #%1: 图像 #%2 ↔ #%3, 评分=%4")
+                .arg(t + 1).arg(initResult.imageId1).arg(initResult.imageId2)
+                .arg(initResult.score, 0, 'f', 4));
+
+        std::vector<Point3D> ptsTry;
+        std::vector<CameraPose> posesTry;
+        const bool okTry = Triangulate::instance()->triangulate(
+            matchPairs, m_features, initResult, viewGraph, ptsTry, posesTry,
+            m_config.fixCameraMatrix, K);
+
+        int regCount = 0;
+        for (const auto &p : posesTry) {
+            if (p.registered) ++regCount;
+        }
+
+        log(QString("[稀疏重建] 第 %1 次尝试: 注册相机 %2/%3, 三维点 %4")
+                .arg(t + 1).arg(regCount).arg(numImagesAll).arg(ptsTry.size()));
+
+        if (okTry && regCount > 0) {
+            const bool better = (regCount > bestRegCount) ||
+                                (regCount == bestRegCount &&
+                                 ptsTry.size() > sparsePoints.size());
+            if (better) {
+                sparsePoints = std::move(ptsTry);
+                cameraPoses = std::move(posesTry);
+                bestRegCount = regCount;
+            }
+            if (regCount >= acceptRegCount) {
+                sparseOk = true;
+                break;
+            }
+        }
+
+        if (m_stopRequested) { log("[稀疏重建] 收到停止请求"); return output; }
+    }
+
+    // 未能达到"几乎全部注册"的目标时，只要有一组能注册出 ≥3 台相机也接受
+    if (!sparseOk) {
+        sparseOk = (bestRegCount >= 3);
+    }
+
+    if (!sparseOk) {
+        log(QString("错误: 三角测量失败（%1 组种子对均未能重建出足够相机，"
+                    "最佳注册数=%2）").arg(initCandidates.size()).arg(bestRegCount));
         return output;
     }
 

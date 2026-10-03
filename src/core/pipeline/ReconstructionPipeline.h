@@ -43,8 +43,14 @@ struct ReconstructionConfig
     QJsonObject matcherParams{
         {"ratioThreshold", 0.8},
         {"ransacThreshold", 3.0},
-        {"minMatchCount", 50},
-        {"minMatchRatio", 0.05},
+        // 建边阈值放宽：大视角数据集单对内点数天然偏少，原先 50 / 0.05 过严
+        {"minMatchCount", 30},
+        {"minMatchRatio", 0.02},
+        // 匹配模式：auto 表示小规模数据集（≤ exhaustiveMaxImages）自动走穷举，
+        // 避免序列窗口漏掉真实重叠对
+        {"matchingMode", "auto"},
+        {"sequenceWindow", 10},
+        {"exhaustiveMaxImages", 50},
     };
 
     int threadCount = 0;  ///< 线程池线程数；0 表示使用物理核心数近似值

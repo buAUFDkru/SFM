@@ -98,6 +98,25 @@ public:
                                const cv::Mat &K);
 
     /**
+     * @brief 寻找排序后的初始化候选对（支持多候选重试）
+     *
+     * 与 findInitialPair 评估逻辑相同，但返回按评分降序排列的 Top-K 候选，
+     * 供上层在某个种子对重建失败时换用下一个候选（对应 COLMAP
+     * init_max_reg_trials 的多轮初始化尝试）。
+     *
+     * @param features 图像特征点列表
+     * @param matchPairs 匹配对列表
+     * @param K 相机内参矩阵
+     * @param topK 返回的候选数量上限；<=0 表示返回全部
+     * @return 按评分降序排列的候选列表（为空表示未找到任何可用对）
+     */
+    std::vector<InitResult> findInitialPairCandidates(
+        const std::vector<FeatureResult> &features,
+        const std::vector<MatchPair> &matchPairs,
+        const cv::Mat &K,
+        int topK = 1);
+
+    /**
      * @brief 2D-2D相对定向：估计F和H，用GRIC准则选择最优模型
      *
      * 同时使用RANSAC估计基础矩阵F和单应矩阵H，计算两种模型的GRIC得分，

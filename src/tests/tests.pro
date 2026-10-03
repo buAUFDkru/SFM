@@ -4,4 +4,5 @@ TEMPLATE = subdirs
 SUBDIRS = \
     plugin_test \
     patchmatch_test \
+    sparse_test \
     ui_test

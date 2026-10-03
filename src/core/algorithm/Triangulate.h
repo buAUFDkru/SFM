@@ -4,8 +4,10 @@
 #include <QObject>
 #include <QVector>
 #include <array>
-#include <tuple>
+#include <functional>
 #include <set>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -13,6 +15,33 @@
 
 #include "data/SfmTypes.h"
 #include "Initialization.h"
+
+/**
+ * @brief 稀疏重建（三角测量 / 增量注册）可调参数
+ *
+ * 阈值默认取自 COLMAP：
+ * - incremental_triangulator.h: min_angle=1.5, create_max_angle_error=2.0
+ * - incremental_mapper.h: abs_pose_min_num_inliers=30,
+ *   abs_pose_min_inlier_ratio=0.25, abs_pose_max_error=12.0, max_reg_trials=3
+ */
+struct TriangulateOptions
+{
+    // ── 三角化过滤 ──────────────────────────────────────────────
+    double minTriAngleDeg   = 1.5;  ///< 最小三角化角度（度）；角度过小则深度不可靠
+    double maxReprojErrorPx = 4.0;  ///< 三角化后允许的最大重投影误差（像素）
+
+    // ── PnP（绝对位姿）校验 ─────────────────────────────────────
+    int    absPoseMinNumInliers   = 30;   ///< 最少 2D-3D 内点数
+    double absPoseMinInlierRatio  = 0.25; ///< 最小内点率
+    double absPoseMaxErrorPx      = 12.0; ///< PnP RANSAC 重投影阈值（像素）
+    double absPoseMaxMedianErrPx  = 12.0; ///< PnP 后中位重投影误差上限（像素）
+
+    // ── 增量注册 ────────────────────────────────────────────────
+    int minCommonPoints = 8;  ///< 三视图共有点下限；不足时跳过本轮新点三角化，
+                              ///< 但**不再终止重建**（可复用历史已三角化点做 PnP）
+    int maxRegTrials    = 3;  ///< 同一条 (待注册图像, 已注册图像) 边的最大尝试次数
+    int topKCandidates  = 4;  ///< 每轮参与排序的跨边界候选边数量
+};
 
 /**
  * @brief 三角测量类 —— 实现增量式SFM（从运动恢复结构）稀疏重建
@@ -24,6 +53,15 @@
  * 4. 全部注册完成后调用 BundleAdjustment::globalBundleAdjustment 全局BA+自标定
  *
  * 初始化阶段（种子对选取、相对定向、位姿恢复）已剥离至 Initialization 类。
+ *
+ * ### 关键点索引 → 三维点映射（kpTo3D）
+ *
+ * 重建过程中维护 kpTo3D[imageId][keypointIdx] = point3DIdx，用于：
+ * - 统计某张未注册图像"当前能看到多少个已三角化点"（COLMAP NumVisiblePoints3D）
+ * - 注册新图像时跨**所有**已注册图像收集 2D-3D 对应，而不是只用本轮新算的点
+ *
+ * 该映射是阶段二（完整 Track / ObservationManager）的雏形，此处先以最小实现落地，
+ * 用于消除"三视图共有点不足即终止重建"的致命缺陷。
  */
 class Triangulate : public QObject
 {
@@ -35,6 +73,12 @@ public:
      * @return Triangulate实例指针
      */
     static Triangulate *instance();
+
+    /// 设置稀疏重建可调参数
+    void setOptions(const TriangulateOptions &options) { m_options = options; }
+
+    /// 获取当前稀疏重建可调参数
+    const TriangulateOptions &options() const { return m_options; }
 
     /**
      * @brief 执行增量式三角测量重建（主入口）
@@ -49,6 +93,10 @@ public:
      * @param outPoints3D 输出：重建的三维点云
      * @param outCameraPoses 输出：估计的相机位姿列表
      * @param fixIntrinsics 是否固定内参（全局BA不优化内参）
+     * @param externalK 外部提供的内参矩阵；为空时按图像尺寸自动估计。
+     *        此前实现无条件重新估计 K，导致调用方传入的已知内参（例如从
+     *        cameramatrix.txt 读入、或 EXIF 焦距推导）在三角测量阶段被丢弃，
+     *        与初始化阶段使用的 K 不一致。
      * @return 重建是否成功
      */
     bool triangulate(const std::vector<MatchPair> &matchPairs,
@@ -57,7 +105,8 @@ public:
                      const ViewGraph &viewGraph,
                      std::vector<Point3D> &outPoints3D,
                      std::vector<CameraPose> &outCameraPoses,
-                     bool fixIntrinsics = false);
+                     bool fixIntrinsics = false,
+                     const cv::Mat &externalK = cv::Mat());
 
 signals:
     /**
@@ -124,18 +173,55 @@ private:
                          std::vector<bool> *outKeepMask = nullptr);
 
     /**
-     * @brief 后方交会 —— 使用EPNP+RANSAC求解相机位姿
+     * @brief 后方交会 —— RANSAC 求解相机位姿并做质量校验
+     *
+     * 流程：
+     * 1. cv::solvePnPRansac（ITERATIVE，失败回退 EPNP）得到粗位姿与内点
+     * 2. 用内点集合调用 cv::solvePnP 精化位姿
+     * 3. 质量校验：内点数 ≥ minNumInliers、内点率 ≥ minInlierRatio、
+     *    中位重投影误差 ≤ maxReprojErrorPx（COLMAP 对应 abs_pose_* 三个阈值）
+     *
      * @param K 相机内参矩阵
-     * @param kps 图像特征点（2D观测）
-     * @param pts3d 对应的三维点（3D坐标）
-     * @param rvec 输出：旋转向量
-     * @param tvec 输出：平移向量
-     * @return 是否成功求解
+     * @param imgPts 图像观测点（2D，像素坐标）
+     * @param pts3d 对应的三维点（世界坐标），与 imgPts 一一对应
+     * @param rvec 输出：旋转向量（3×1）
+     * @param tvec 输出：平移向量（3×1）
+     * @param outInlierMask 可选输出：内点掩码（与输入点一一对应，1=内点）
+     * @param minNumInliers 最小内点数
+     * @param minInlierRatio 最小内点率
+     * @param maxReprojErrorPx RANSAC 阈值与中位误差上限（像素）
+     * @return 是否成功求解并通过质量校验
      */
     bool resection(const cv::Mat &K,
-                   const std::vector<cv::KeyPoint> &kps,
+                   const std::vector<cv::Point2d> &imgPts,
                    const std::vector<cv::Point3d> &pts3d,
-                   cv::Mat &rvec, cv::Mat &tvec);
+                   cv::Mat &rvec, cv::Mat &tvec,
+                   std::vector<uchar> *outInlierMask = nullptr,
+                   int minNumInliers = 30,
+                   double minInlierRatio = 0.25,
+                   double maxReprojErrorPx = 12.0);
+
+    /**
+     * @brief 统计某张图像当前"能看到"多少个已三角化的三维点
+     *
+     * 对应 COLMAP ObservationManager::NumVisiblePoints3D：遍历该图像与所有已注册
+     * 图像之间的匹配，只要匹配到的关键点已关联三维点即计入（按三维点去重）。
+     *
+     * 该数量同时决定了：
+     * - 该图像能否被注册（需 ≥ absPoseMinNumInliers）
+     * - 该图像在候选队列中的优先级（数量越多越优先，几何约束越强）
+     *
+     * @param imageId 待查询图像ID
+     * @param kpTo3D 关键点索引 → 三维点索引映射（按图像下标）
+     * @param registeredCameras 已注册相机集合
+     * @param findMatchPair 匹配对查找函数
+     * @return 可见三维点数量
+     */
+    int numVisiblePoints3D(
+        int imageId,
+        const std::vector<std::unordered_map<int, int>> &kpTo3D,
+        const std::set<int> &registeredCameras,
+        const std::function<const MatchPair *(int, int)> &findMatchPair) const;
 
     /**
      * @brief 基于特征点在多分辨率网格中的分布计算图像权重得分
@@ -155,6 +241,9 @@ private:
      * @brief 单例实例指针
      */
     static Triangulate *s_instance;
+
+    /// 稀疏重建可调参数（阈值集中于此，便于按数据集调优）
+    TriangulateOptions m_options;
 };
 
 #endif // TRIANGULATE_H

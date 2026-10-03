@@ -23,8 +23,10 @@ class PluginRegistry;
  * IMatcherPlugin（无状态工厂）并按任务 createWorker() 独占实例，因此
  * 线程池并行路径天然遵守"逐任务独立 Worker"的插件并发规范。
  *
- * 编排流程（与 sfm2.0 完全一致）：
- * 1. 候选对选择：序列窗口 5（每图与后最多 5 张图匹配）
+ * 编排流程：
+ * 1. 候选对选择：sequential（每图与其后 sequenceWindow 张图匹配，默认 10）
+ *    或 exhaustive（两两全匹配）。默认 auto：图像数 ≤ exhaustiveMaxImages
+ *    （默认 50）时自动采用穷举，避免无序 / 大视角间隔数据集漏掉真实重叠对
  * 2. 两两低层 KNN 匹配（插件 Worker）+ Lowe 比率过滤
  * 3. GRIC 几何验证（Initialization::selectModel 同时估计 F/H 并择优）
  * 4. 按 minMatchCount / minMatchRatio 阈值判定是否构成视图图边
@@ -44,7 +46,10 @@ public:
      * @param matcherId 匹配器插件 id（如 "FLANN" / "BruteForce"）
      * @param params 编排参数（QJsonObject）：
      *        ratioThreshold=0.8, ransacThreshold=3.0,
-     *        minMatchCount=50, minMatchRatio=0.05；其余键传给底层匹配器 Worker 参数
+     *        minMatchCount=30, minMatchRatio=0.02,
+     *        matchingMode=auto|sequential|exhaustive,
+     *        sequenceWindow=10, exhaustiveMaxImages=50；
+     *        其余键传给底层匹配器 Worker 参数
      * @param outPairs 输出的验证后匹配对
      * @param threadPool 线程池指针（可为 nullptr，走串行路径）
      * @param logCallback 日志回调（可为 nullptr）

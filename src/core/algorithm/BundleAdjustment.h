@@ -68,6 +68,12 @@ public:
      * @param fy 输入输出：焦距y（参与精化，优化后fx=fy=f）
      * @param cx 输入输出：主点x（参与精化）
      * @param cy 输入输出：主点y（参与精化）
+     * @param fixIntrinsics 是否固定内参
+     * @param refCameraIdx 世界坐标系参考相机（该相机外参固定）。
+     *        传入种子图像 ID 而非硬编码 0 —— 种子图像未必是第 0 张，
+     *        固定一个无观测的相机会让整个系统存在 7 自由度规范自由度而漂移。
+     * @param cameraVariable 可选：长度 = cameras.size()，1=参与优化，0=固定
+     *        （未注册相机应传 0）。为 nullptr 时表示全部参与优化。
      * @return 是否收敛
      */
     bool globalBundleAdjustment(
@@ -75,7 +81,9 @@ public:
         std::vector<std::array<double, 3>> &points3d,
         const std::vector<std::tuple<int, int, cv::Point2d>> &observations,
         double &fx, double &fy, double &cx, double &cy,
-        bool fixIntrinsics = false);
+        bool fixIntrinsics = false,
+        int refCameraIdx = 0,
+        const std::vector<char> *cameraVariable = nullptr);
 
 private:
     explicit BundleAdjustment(QObject *parent = nullptr);

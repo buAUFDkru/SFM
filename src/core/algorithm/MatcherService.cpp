@@ -35,6 +35,9 @@ std::unique_ptr<IMatcherWorker> MatcherService::createMatcherWorker(
     workerParams.remove("ransacThreshold");
     workerParams.remove("minMatchCount");
     workerParams.remove("minMatchRatio");
+    workerParams.remove("matchingMode");
+    workerParams.remove("sequenceWindow");
+    workerParams.remove("exhaustiveMaxImages");
 
     return plugin->createWorker(workerParams);
 }
@@ -68,17 +71,44 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
 
     const int N = static_cast<int>(features.size());
 
-    // 3. 序列匹配：每张图像与其后最多 5 张图像匹配
-    const int sequenceWindow = 5;
+    // 3. 候选对生成
+    //    sequential：每张图像与其后 sequenceWindow 张图匹配（历史行为，窗口现可配）
+    //    exhaustive：所有图像两两匹配
+    //    auto：小规模数据集（≤ exhaustiveMaxImages）自动走穷举
+    //
+    //    原先窗口硬编码为 5，无序数据集或相邻帧视角跨度大的数据集会漏掉
+    //    大量真实重叠对，视图图退化甚至断裂，后续增量重建无从谈起。
+    const QString matchingMode =
+        params.value(QStringLiteral("matchingMode")).toString(QStringLiteral("auto")).toLower();
+    const int sequenceWindow =
+        params.value(QStringLiteral("sequenceWindow")).toInt(10);
+    const int exhaustiveMaxImages =
+        params.value(QStringLiteral("exhaustiveMaxImages")).toInt(50);
+    const bool useExhaustive =
+        (matchingMode == QStringLiteral("exhaustive")) ||
+        (matchingMode == QStringLiteral("auto") && N <= exhaustiveMaxImages);
+
     std::vector<std::pair<int, int>> candidatePairs;
-    candidatePairs.reserve(N * sequenceWindow);
-    for (int i = 0; i < N; ++i) {
-        for (int k = 1; k <= sequenceWindow && i + k < N; ++k) {
-            candidatePairs.push_back({i, i + k});
+    if (useExhaustive) {
+        candidatePairs.reserve(static_cast<size_t>(N) * (N - 1) / 2);
+        for (int i = 0; i < N; ++i) {
+            for (int j = i + 1; j < N; ++j) {
+                candidatePairs.push_back({i, j});
+            }
         }
+        qDebug().noquote()
+            << QString("[匹配] 图像数=%1, 穷举匹配 %2 对").arg(N).arg(candidatePairs.size());
+    } else {
+        candidatePairs.reserve(static_cast<size_t>(N) * std::max(1, sequenceWindow));
+        for (int i = 0; i < N; ++i) {
+            for (int k = 1; k <= sequenceWindow && i + k < N; ++k) {
+                candidatePairs.push_back({i, i + k});
+            }
+        }
+        qDebug().noquote()
+            << QString("[匹配] 图像数=%1, 序列匹配(窗口=%2) %3 对")
+                   .arg(N).arg(sequenceWindow).arg(candidatePairs.size());
     }
-    qDebug().noquote()
-        << QString("[匹配] 图像数=%1, 序列匹配 %2 对").arg(N).arg(candidatePairs.size());
 
     // 记录已经尝试过的图像对，避免序列匹配失败的组合在传递性阶段被重复尝试
     std::set<std::pair<int, int>> attempted;

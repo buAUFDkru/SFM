@@ -205,7 +205,9 @@ bool BundleAdjustment::globalBundleAdjustment(
     std::vector<std::array<double, 3>> &points3d,
     const std::vector<std::tuple<int, int, cv::Point2d>> &observations,
     double &fx, double &fy, double &cx, double &cy,
-    bool fixIntrinsics)
+    bool fixIntrinsics,
+    int refCameraIdx,
+    const std::vector<char> *cameraVariable)
 {
     if (cameras.size() < 2 || points3d.empty() || observations.empty())
         return false;
@@ -217,9 +219,18 @@ bool BundleAdjustment::globalBundleAdjustment(
     double f_init = (fx + fy) / 2.0;
     double K[3] = {f_init, cx, cy};
 
+    const bool hasMask = (cameraVariable != nullptr &&
+                          cameraVariable->size() == cameras.size());
+
     for (size_t i = 0; i < cameras.size(); ++i) {
         problem.AddParameterBlock(cameras[i].data(), 6);
-        if (i == 0) {
+
+        // 参考相机固定（世界坐标系基准）
+        const bool isRef = (static_cast<int>(i) == refCameraIdx);
+        // 未注册相机固定：它们没有任何观测，参与优化只会引入自由度与噪声
+        const bool excluded = hasMask && ((*cameraVariable)[i] == 0);
+
+        if (isRef || excluded) {
             problem.SetParameterBlockConstant(cameras[i].data());
         }
     }

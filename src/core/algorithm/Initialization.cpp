@@ -436,13 +436,14 @@ bool Initialization::recoverPoseFromH(const std::vector<cv::Point2d> &pts1,
  *   10° < angle ≤ 20° → 权重线性衰减
  *   angle > 20° → 权重=0（基线过宽，匹配不可靠）
  */
-InitResult Initialization::findInitialPair(const std::vector<FeatureResult> &features,
-                                            const std::vector<MatchPair> &matchPairs,
-                                            const cv::Mat &K)
+std::vector<InitResult> Initialization::findInitialPairCandidates(
+    const std::vector<FeatureResult> &features,
+    const std::vector<MatchPair> &matchPairs,
+    const cv::Mat &K,
+    int topK)
 {
-    InitResult best;
-    best.score = -1.0;
-    best.modelChoice = -1;
+    std::vector<InitResult> scored;
+    scored.reserve(matchPairs.size());
 
     for (const auto &mp : matchPairs) {
         // ── 过滤匹配点数不足的候选对 ──
@@ -561,10 +562,16 @@ InitResult Initialization::findInitialPair(const std::vector<FeatureResult> &fea
             // 最优区间：权重=1
             angleWeight = 1.0;
         } else if (medAngle > 10.0 && medAngle <= 20.0) {
-            // 线性衰减：10°→1, 20°→0
-            angleWeight = 1.0 - (medAngle - 10.0) / 10.0;
+            // 缓衰减：10°→1, 20°→0.5（原实现衰减到 0，对大视角数据集过于严苛）
+            angleWeight = 1.0 - 0.5 * (medAngle - 10.0) / 10.0;
+        } else if (medAngle > 20.0) {
+            // 大视角数据集的中位三角化角常常远超 20°。原实现此处直接归零，
+            // 会导致所有候选对得分同为 0，种子对退化成"循环里碰到的第一个"。
+            // 改为缓慢衰减，保证宽基线对之间仍有区分度：
+            //   20°→0.5, 40°→0.25, 60°→0.167, 90°→0.125
+            angleWeight = 0.5 / (1.0 + (medAngle - 20.0) / 20.0);
         }
-        // <1° 或 >20°：angleWeight = 0.0
+        // <1°：angleWeight = 0.0（纯旋转 / 基线过短，确实退化）
 
         // ── 综合评分 ──
         int validInliers = static_cast<int>(angles.size());
@@ -584,43 +591,74 @@ InitResult Initialization::findInitialPair(const std::vector<FeatureResult> &fea
         //            .arg(baseline, 0, 'f', 4)
         //            .arg(pairScore, 0, 'f', 2);
 
-        // ── 更新最优结果 ──
-        if (pairScore > best.score) {
-            best.imageId1 = imgId1;
-            best.imageId2 = imgId2;
-            best.R = R.clone();
-            best.t = t.clone();
-            best.F = mp.F.clone();
-            best.H = mp.H.clone();
-            best.modelChoice = modelChoice;
-            best.score = pairScore;
-            best.baseline = baseline;
-            best.medianAngle = medAngle;
+        // ── 记录候选（不再只保留单个最优，便于上层逐个重试）──
+        //  评分为 0 的对（角度 <1° 的退化情形）仍然保留作为兜底，但排序时靠后
+        if (pairScore < 0.0) continue;
 
-            // 保存内点坐标和匹配索引
-            best.points1.clear();
-            best.points2.clear();
-            best.inlierMatches.clear();
-            for (const auto &m : mp.matches) {
-                best.points1.push_back(kpts1[m.queryIdx].pt);
-                best.points2.push_back(kpts2[m.trainIdx].pt);
-                best.inlierMatches.push_back(m);
-            }
+        InitResult cand;
+        cand.imageId1 = imgId1;
+        cand.imageId2 = imgId2;
+        cand.R = R.clone();
+        cand.t = t.clone();
+        cand.F = mp.F.clone();
+        cand.H = mp.H.clone();
+        cand.modelChoice = modelChoice;
+        cand.score = pairScore;
+        cand.baseline = baseline;
+        cand.medianAngle = medAngle;
+
+        // 保存内点坐标和匹配索引
+        for (const auto &m : mp.matches) {
+            cand.points1.push_back(kpts1[m.queryIdx].pt);
+            cand.points2.push_back(kpts2[m.trainIdx].pt);
+            cand.inlierMatches.push_back(m);
+        }
+        scored.push_back(std::move(cand));
+    }
+
+    // 按评分降序；评分相同时按内点数降序
+    // （大视角数据集常见多个候选评分并列，此时内点数是更可靠的区分依据）
+    std::sort(scored.begin(), scored.end(),
+              [](const InitResult &a, const InitResult &b) {
+                  if (a.score != b.score) return a.score > b.score;
+                  return a.points1.size() > b.points1.size();
+              });
+
+    if (topK > 0 && static_cast<int>(scored.size()) > topK) {
+        scored.resize(static_cast<size_t>(topK));
+    }
+
+    // ── 输出候选结果 ──
+    if (scored.empty()) {
+        qDebug().noquote() << "[初始化] 未找到合适的初始化对";
+    } else {
+        for (size_t i = 0; i < scored.size(); ++i) {
+            const InitResult &c = scored[i];
+            qDebug().noquote()
+                << QString("[初始化] 候选 #%1: #%2↔#%3, 评分=%4, 基线=%5, 角度=%6°, 模型=%7")
+                       .arg(i + 1).arg(c.imageId1).arg(c.imageId2)
+                       .arg(c.score, 0, 'f', 2)
+                       .arg(c.baseline, 0, 'f', 4)
+                       .arg(c.medianAngle, 0, 'f', 2)
+                       .arg(c.modelChoice == 0 ? "F" : "H");
         }
     }
 
-    // ── 输出最终结果 ──
-    if (best.score < 0) {
-        qDebug().noquote() << "[初始化] 未找到合适的初始化对";
-    } else {
-        qDebug().noquote()
-            << QString("[初始化] 最优初始化对: #%1↔#%2, 评分=%3, 基线=%4, 角度=%5°, 模型=%6")
-                   .arg(best.imageId1).arg(best.imageId2)
-                   .arg(best.score, 0, 'f', 2)
-                   .arg(best.baseline, 0, 'f', 4)
-                   .arg(best.medianAngle, 0, 'f', 2)
-                   .arg(best.modelChoice == 0 ? "F" : "H");
-    }
+    return scored;
+}
 
+InitResult Initialization::findInitialPair(const std::vector<FeatureResult> &features,
+                                            const std::vector<MatchPair> &matchPairs,
+                                            const cv::Mat &K)
+{
+    const std::vector<InitResult> cands =
+        findInitialPairCandidates(features, matchPairs, K, 1);
+
+    InitResult best;
+    best.score = -1.0;
+    best.modelChoice = -1;
+    if (!cands.empty()) {
+        best = cands.front();
+    }
     return best;
 }
