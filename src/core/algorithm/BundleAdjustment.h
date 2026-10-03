@@ -29,28 +29,37 @@ public:
     static BundleAdjustment *instance();
 
     /**
-     * @brief 局部光束法平差 —— 每加入一张新图像后执行
+     * @brief 局部光束法平差 —— 每注册一张新图像后执行（COLMAP AdjustLocalBundle）
      *
-     * 仅优化最新注册的相机位姿（R, t）和最新添加的三维点坐标，
-     * 其余相机和三维点保持固定，实现增量式逐帧优化。
+     * 优化「局部图像集合」的位姿 + 「可变三维点集合」的坐标，其余保持固定。
+     *
+     * 阶段一只优化最新注册的 1 个相机和本轮新点，收敛范围过窄：
+     * 新相机的误差会全部挤压到新点上，历史点无法被修正，漂移一旦产生
+     * 就再也无法挽回。COLMAP 的做法是取与新图共享观测最多的 Top-N 张图
+     * （ba_local_num_images = 6）一起优化，这也是局部BA能抑制漂移的关键。
      *
      * @param cameras 所有相机位姿数组 [rx, ry, rz, tx, ty, tz]
      * @param points3d 所有三维点坐标数组 [X, Y, Z]
-     * @param observations 所有观测数据（相机索引, 三维点索引, 像素坐标）
-     * @param fx 焦距x，固定不优化
-     * @param fy 焦距y，固定不优化
-     * @param cx 主点x，固定不优化
-     * @param cy 主点y，固定不优化
-     * @param newCameraIdx 新注册的相机索引（仅此相机参与优化）
-     * @param newPointStartIdx 新添加的三维点起始索引（从此索引开始的点参与优化）
+     * @param observations 参与优化的观测（相机索引, 三维点索引, 像素坐标）
+     *        由调用方裁剪到局部集合，避免无关残差拖慢求解
+     * @param fx 焦距x（局部BA不优化内参）
+     * @param fy 焦距y
+     * @param cx 主点x
+     * @param cy 主点y
+     * @param cameraVariable 长度 = cameras.size()，1=参与优化，0=固定
+     * @param pointVariable 长度 = points3d.size()，1=参与优化，0=固定
+     * @param refCameraIdx 世界坐标系参考相机（固定，消除规范自由度）；
+     *        < 0 表示不额外固定（此时由调用方保证至少有一个相机固定）
      * @return 是否收敛
      */
-    bool bundleAdjustment(
+    bool localBundleAdjustment(
         std::vector<std::array<double, 6>> &cameras,
         std::vector<std::array<double, 3>> &points3d,
         const std::vector<std::tuple<int, int, cv::Point2d>> &observations,
         double fx, double fy, double cx, double cy,
-        int newCameraIdx, int newPointStartIdx);
+        const std::vector<char> &cameraVariable,
+        const std::vector<char> &pointVariable,
+        int refCameraIdx = -1);
 
     /**
      * @brief 全局光束法平差 + 自标定精化 —— 重建流程末尾执行

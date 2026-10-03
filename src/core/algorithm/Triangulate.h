@@ -10,11 +10,17 @@
 #include <unordered_map>
 #include <vector>
 
+#include <memory>
+#include <set>
+
 #include <opencv2/core.hpp>
 #include <opencv2/calib3d.hpp>
 
 #include "data/SfmTypes.h"
 #include "Initialization.h"
+#include "CorrespondenceGraph.h"
+#include "ObservationManager.h"
+#include "IncrementalTriangulator.h"
 
 /**
  * @brief 稀疏重建（三角测量 / 增量注册）可调参数
@@ -37,10 +43,40 @@ struct TriangulateOptions
     double absPoseMaxMedianErrPx  = 12.0; ///< PnP 后中位重投影误差上限（像素）
 
     // ── 增量注册 ────────────────────────────────────────────────
-    int minCommonPoints = 8;  ///< 三视图共有点下限；不足时跳过本轮新点三角化，
-                              ///< 但**不再终止重建**（可复用历史已三角化点做 PnP）
-    int maxRegTrials    = 3;  ///< 同一条 (待注册图像, 已注册图像) 边的最大尝试次数
-    int topKCandidates  = 4;  ///< 每轮参与排序的跨边界候选边数量
+    int minCommonPoints = 8;  ///< 三视图共有点下限（阶段一遗留；阶段二已不再依赖它决定成败）
+    int maxRegTrials    = 3;  ///< 同一张图像的最大注册尝试次数（COLMAP max_reg_trials）
+
+    // ── 局部BA（阶段二，对应 COLMAP ba_local_*）───────────────────
+    int    baLocalNumImages = 6;      ///< 局部BA参与优化的邻域图像数量
+    int    baLocalMaxRefinements = 2; ///< 局部BA最大迭代精化次数
+    double baLocalMaxRefinementChange = 0.001; ///< 变化率低于此值即停止精化
+    int    baLocalMaxTrackLength = 15;///< 轨迹长于此值的点视为已稳定，不参与局部BA
+
+    // ── 全局BA与精化 ──────────────────────────────────────────────
+    int    globalMaxRefinements = 3;  ///< 末尾全局BA迭代精化次数
+    double globalMaxRefinementChange = 0.0005;
+
+    // ── 外点过滤 ──────────────────────────────────────────────────
+    double filterMaxReprojErrorPx = 4.0;  ///< 过滤重投影误差阈值（像素）
+    double filterMinTriAngleDeg   = 1.5;  ///< 过滤三角化角下限（度）
+
+    /**
+     * @brief 种子对初始化后首轮过滤的放宽阈值（像素）
+     *
+     * 此时内参尚未标定好（尤其是从图像尺寸按 60° FOV 估算的焦距，
+     * 与无人机相机真实的 ~84° 相差可达 30%），重投影误差普遍偏大。
+     * 用 COLMAP 的 4px 严格阈值会把点全部滤光导致重建失败，
+     * 因此首轮放宽，待全局BA自标定收敛后再收紧到 4px。
+     */
+    double initialFilterMaxReprojErrorPx = 12.0;
+
+    // ── 初始化三角化 ──────────────────────────────────────────────
+    double initMinTriAngleDeg = 16.0; ///< 种子对三角化角下限（COLMAP init_min_tri_angle）
+
+    // ── 阶段二开关 ────────────────────────────────────────────────
+    bool enableTrackCompletion  = true; ///< 是否执行 Complete / Merge
+    bool enableRetriangulation  = true; ///< 是否执行 Retriangulate
+    bool allowTwoViewTracksFallback = true; ///< 种子对无点时是否放宽「忽略两视图轨迹」
 };
 
 /**
@@ -79,6 +115,15 @@ public:
 
     /// 获取当前稀疏重建可调参数
     const TriangulateOptions &options() const { return m_options; }
+
+    /// 设置增量三角化器参数（Complete / Merge / Retriangulate 的阈值）
+    void setTriangulatorOptions(const TriangulatorOptions &options)
+    {
+        m_triOptions = options;
+    }
+
+    /// 获取当前增量三角化器参数
+    const TriangulatorOptions &triangulatorOptions() const { return m_triOptions; }
 
     /**
      * @brief 执行增量式三角测量重建（主入口）
@@ -201,27 +246,83 @@ private:
                    double minInlierRatio = 0.25,
                    double maxReprojErrorPx = 12.0);
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  阶段二：增量重建子步骤（对应 COLMAP IncrementalMapper 的同名流程）
+    // ══════════════════════════════════════════════════════════════════════
+
     /**
-     * @brief 统计某张图像当前"能看到"多少个已三角化的三维点
+     * @brief 排名下一批待注册图像（COLMAP FindNextImages）
      *
-     * 对应 COLMAP ObservationManager::NumVisiblePoints3D：遍历该图像与所有已注册
-     * 图像之间的匹配，只要匹配到的关键点已关联三维点即计入（按三维点去重）。
-     *
-     * 该数量同时决定了：
-     * - 该图像能否被注册（需 ≥ absPoseMinNumInliers）
-     * - 该图像在候选队列中的优先级（数量越多越优先，几何约束越强）
-     *
-     * @param imageId 待查询图像ID
-     * @param kpTo3D 关键点索引 → 三维点索引映射（按图像下标）
-     * @param registeredCameras 已注册相机集合
-     * @param findMatchPair 匹配对查找函数
-     * @return 可见三维点数量
+     * 按「可见三维点数」降序；已尝试次数达上限的图像被排除。
+     * @return (可见点数, 图像ID) 列表，已按可见点数降序排列
      */
-    int numVisiblePoints3D(
-        int imageId,
-        const std::vector<std::unordered_map<int, int>> &kpTo3D,
-        const std::set<int> &registeredCameras,
-        const std::function<const MatchPair *(int, int)> &findMatchPair) const;
+    std::vector<std::pair<int, int>> findNextImages() const;
+
+    /**
+     * @brief 注册一张新图像（COLMAP RegisterNextImage）
+     *
+     * 1. 收集该图的 2D-3D 对应（来自所有已注册图像的已三角化点）
+     * 2. PnP + 内点数 / 内点率 / 中位误差校验
+     * 3. 成功后三角化该图上的新点并执行局部BA精化
+     * @return 是否注册成功
+     */
+    bool registerNextImage(int imageId);
+
+    /// 三角化新注册图像 + 迭代局部BA精化
+    void triangulateAndRefineImage(int imageId);
+
+    /**
+     * @brief 迭代局部BA精化（COLMAP IterativeLocalRefinement）
+     *
+     * 反复执行「局部BA → 合并轨迹 → 补全轨迹 → 过滤外点」，
+     * 直到变化率低于阈值或达到最大次数。
+     */
+    void iterativeLocalRefinement(int imageId);
+
+    /**
+     * @brief 一次局部BA（COLMAP AdjustLocalBundle）
+     *
+     * 优化「新注册相机 + 共享观测最多的 Top-N 邻域相机」的位姿，
+     * 以及本轮被新建/修改的三维点。
+     */
+    void adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds);
+
+    /**
+     * @brief 找出与新注册图像共享三维点最多的邻域图像（COLMAP FindLocalBundle）
+     */
+    void findLocalBundle(int imageId, std::vector<int> &outImageIds) const;
+
+    /**
+     * @brief 收集参与BA的观测
+     *
+     * @param imageSet 相机白名单（为空表示不限）
+     * @param pointSet 三维点白名单（为空表示不限）
+     */
+    void collectObservations(const std::set<int> &imageSet,
+                             const std::set<int> &pointSet,
+                             std::vector<std::tuple<int, int, cv::Point2d>> &out) const;
+
+    /// 组装BA用的相机参数数组 [rx,ry,rz,tx,ty,tz]
+    void buildCameraParams(std::vector<std::array<double, 6>> &out) const;
+
+    /// 组装BA用的三维点数组（下标 = ObservationManager 的点 id，含墓碑位）
+    void buildPointParams(std::vector<std::array<double, 3>> &out) const;
+
+    /// 把BA优化后的相机参数写回位姿数组
+    void applyCameraParams(const std::vector<std::array<double, 6>> &cameras,
+                           const std::vector<char> &cameraVariable);
+
+    /// 把BA优化后的点坐标写回 ObservationManager
+    void applyPointParams(const std::vector<std::array<double, 3>> &points);
+
+    /// 全局BA + 自标定（固定种子相机；未注册相机不参与）
+    void runGlobalBundleAdjustment(bool fixIntrinsics);
+
+    /// 补全 + 合并全部轨迹
+    size_t completeAndMergeTracks();
+
+    /// 推送当前重建状态（点云 + 已注册相机）
+    void emitCurrentState(bool reset);
 
     /**
      * @brief 基于特征点在多分辨率网格中的分布计算图像权重得分
@@ -244,6 +345,26 @@ private:
 
     /// 稀疏重建可调参数（阈值集中于此，便于按数据集调优）
     TriangulateOptions m_options;
+
+    /// 增量三角化器参数
+    TriangulatorOptions m_triOptions;
+
+    // ── 阶段二运行时状态（仅在 triangulate() 执行期间有效）──────────────
+    const std::vector<MatchPair> *m_matchPairs = nullptr;
+    const std::vector<FeatureResult> *m_features = nullptr;
+
+    std::unique_ptr<CorrespondenceGraph> m_graph;
+    std::unique_ptr<ObservationManager> m_obs;
+    std::unique_ptr<IncrementalTriangulator> m_triangulator;
+
+    std::vector<CameraPose> *m_poses = nullptr;    ///< 指向输出位姿数组
+    cv::Mat m_K;                                  ///< 当前内参（自标定后会更新）
+    std::set<int> m_registeredCameras;
+    std::vector<int> m_numRegTrials;              ///< 每张图像的注册尝试次数
+    int m_refCameraId = 0;                        ///< 世界坐标系参考相机（种子图1）
+
+    size_t m_lastLocalChanged = 0;    ///< 上次局部BA后被合并/补全/过滤的观测数
+    size_t m_lastLocalResiduals = 0;  ///< 上次局部BA参与优化的观测数
 };
 
 #endif // TRIANGULATE_H

@@ -24,6 +24,7 @@
 
 #include "Triangulate.h"
 #include "BundleAdjustment.h"
+#include "SfmGeometry.h"
 
 #include <QtMath>
 #include <QVector>
@@ -53,70 +54,6 @@ Triangulate::Triangulate(QObject *parent)
 // ═════════════════════════════════════════════════════════════════════════════
 //  内部辅助函数
 // ═════════════════════════════════════════════════════════════════════════════
-
-namespace {
-
-/// 计算向量中位数（为空返回 0）
-double medianOf(const std::vector<double> &v)
-{
-    if (v.empty()) return 0.0;
-    std::vector<double> s = v;
-    std::sort(s.begin(), s.end());
-    const size_t mid = s.size() / 2;
-    if (s.size() % 2 == 0) return (s[mid - 1] + s[mid]) * 0.5;
-    return s[mid];
-}
-
-/// 相机光心在世界坐标系中的位置：C = -Rᵀ·t
-cv::Vec3d cameraCenter(const cv::Mat &R, const cv::Mat &t)
-{
-    cv::Mat C = -R.t() * t;
-    return cv::Vec3d(C.at<double>(0), C.at<double>(1), C.at<double>(2));
-}
-
-/// 将世界点投影到像素平面，返回重投影误差（像素）；深度 ≤ 0 时返回 -1
-double reprojectionError(const cv::Vec3d &Pw,
-                         const cv::Mat &R, const cv::Mat &t,
-                         const cv::Mat &K,
-                         const cv::Point2d &obs)
-{
-    cv::Mat PwMat = (cv::Mat_<double>(3, 1) << Pw[0], Pw[1], Pw[2]);
-    cv::Mat Pc = R * PwMat + t;
-    const double z = Pc.at<double>(2, 0);
-    if (z <= 0.0) return -1.0;
-
-    const double fx = K.at<double>(0, 0);
-    const double fy = K.at<double>(1, 1);
-    const double cx = K.at<double>(0, 2);
-    const double cy = K.at<double>(1, 2);
-
-    const double u = fx * Pc.at<double>(0, 0) / z + cx;
-    const double v = fy * Pc.at<double>(1, 0) / z + cy;
-
-    return std::hypot(u - obs.x, v - obs.y);
-}
-
-/**
- * @brief 计算三角化角度（两条视线之间的夹角，度）
- *
- * 视线定义为「从相机光心指向三维点」的方向。角度过小说明基线相对深度太短，
- * 深度估计不可靠（COLMAP 判据：min_angle = 1.5°）。
- */
-double triangulationAngleDeg(const cv::Vec3d &Pw,
-                             const cv::Vec3d &C1, const cv::Vec3d &C2)
-{
-    cv::Vec3d r1 = Pw - C1;
-    cv::Vec3d r2 = Pw - C2;
-    const double n1 = cv::norm(r1);
-    const double n2 = cv::norm(r2);
-    if (n1 < 1e-12 || n2 < 1e-12) return 0.0;
-
-    double cosA = (r1[0] * r2[0] + r1[1] * r2[1] + r1[2] * r2[2]) / (n1 * n2);
-    cosA = std::max(-1.0, std::min(1.0, cosA));
-    return std::acos(cosA) * 180.0 / CV_PI;
-}
-
-} // namespace
 
 cv::Mat Triangulate::estimateK(const std::vector<FeatureResult> &features)
 {
@@ -222,8 +159,8 @@ void Triangulate::triangulatePair(const MatchPair &pair,
     }
 
     // 相机光心（世界坐标），用于三角化角度计算
-    const cv::Vec3d C1 = cameraCenter(R1, t1);
-    const cv::Vec3d C2 = cameraCenter(R2, t2);
+    const cv::Vec3d C1 = SfmGeom::cameraCenter(R1, t1);
+    const cv::Vec3d C2 = SfmGeom::cameraCenter(R2, t2);
 
     int rejectedBehind = 0;
     int rejectedAngle  = 0;
@@ -256,15 +193,15 @@ void Triangulate::triangulatePair(const MatchPair &pair,
         }
 
         // ── 三角化角度过滤（COLMAP min_angle = 1.5°）────────────────────
-        const double angleDeg = triangulationAngleDeg(Pw, C1, C2);
+        const double angleDeg = SfmGeom::triangulationAngleDeg(Pw, C1, C2);
         if (angleDeg < m_options.minTriAngleDeg) {
             ++rejectedAngle;
             continue;
         }
 
         // ── 重投影误差过滤 ──────────────────────────────────────────────
-        const double e1 = reprojectionError(Pw, R1, t1, K1, pts1[i]);
-        const double e2 = reprojectionError(Pw, R2, t2, K2, pts2[i]);
+        const double e1 = SfmGeom::reprojectionError(Pw, R1, t1, K1, pts1[i]);
+        const double e2 = SfmGeom::reprojectionError(Pw, R2, t2, K2, pts2[i]);
         if (e1 < 0.0 || e2 < 0.0) {
             ++rejectedBehind;
             continue;
@@ -360,7 +297,7 @@ bool Triangulate::resection(const cv::Mat &K,
     std::vector<uchar> mask(n, 0);
     for (size_t i = 0; i < n; ++i) {
         const cv::Vec3d Pw(pts3d[i].x, pts3d[i].y, pts3d[i].z);
-        const double e = reprojectionError(Pw, Rref, tvecRefined, K, imgPts[i]);
+        const double e = SfmGeom::reprojectionError(Pw, Rref, tvecRefined, K, imgPts[i]);
         if (e >= 0.0 && e <= maxReprojErrorPx) {
             mask[i] = 1;
             errors.push_back(e);
@@ -369,7 +306,7 @@ bool Triangulate::resection(const cv::Mat &K,
 
     const int numInliers = static_cast<int>(errors.size());
     const double inlierRatio = static_cast<double>(numInliers) / static_cast<double>(n);
-    const double medianErr = medianOf(errors);
+    const double medianErr = SfmGeom::medianOf(errors);
 
     rvec = rvecRefined.clone();
     tvec = tvecRefined.clone();
@@ -406,50 +343,402 @@ bool Triangulate::resection(const cv::Mat &K,
     return true;
 }
 
-int Triangulate::numVisiblePoints3D(
-    int imageId,
-    const std::vector<std::unordered_map<int, int>> &kpTo3D,
-    const std::set<int> &registeredCameras,
-    const std::function<const MatchPair *(int, int)> &findMatchPair) const
+// ═════════════════════════════════════════════════════════════════════════════
+//  阶段二：COLMAP 式增量重建
+// ═════════════════════════════════════════════════════════════════════════════
+
+std::vector<std::pair<int, int>> Triangulate::findNextImages() const
 {
-    std::set<int> seenPointIds;
+    std::vector<std::pair<int, int>> ranked;  // (可见三维点数, 图像ID)
 
-    for (int regId : registeredCameras) {
-        if (regId == imageId) continue;
-        if (regId < 0 || regId >= static_cast<int>(kpTo3D.size())) continue;
+    const int numImages = static_cast<int>(m_features->size());
+    for (int i = 0; i < numImages; ++i) {
+        if ((*m_poses)[static_cast<size_t>(i)].registered) continue;
+        if (m_numRegTrials[static_cast<size_t>(i)] >= m_options.maxRegTrials) continue;
 
-        const MatchPair *mp = findMatchPair(regId, imageId);
-        if (!mp) continue;
+        const int visible = static_cast<int>(m_obs->numVisiblePoints3D(i));
+        ranked.emplace_back(visible, i);
+    }
 
-        // 提取 (imageId 的关键点索引, regId 的关键点索引)
-        const bool imageIdIsFirst = (mp->imageId1 == imageId);
-        for (const auto &m : mp->matches) {
-            const int kptReg = imageIdIsFirst ? m.trainIdx : m.queryIdx;
-            const auto it = kpTo3D[regId].find(kptReg);
-            if (it != kpTo3D[regId].end()) {
-                seenPointIds.insert(it->second);
-            }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const std::pair<int, int> &a, const std::pair<int, int> &b) {
+                  if (a.first != b.first) return a.first > b.first;
+                  return a.second < b.second;
+              });
+
+    return ranked;
+}
+
+bool Triangulate::registerNextImage(int imageId)
+{
+    std::vector<int> kptIdx, pointId;
+    m_obs->collect2D3DCorrespondences(imageId, kptIdx, pointId);
+
+    if (static_cast<int>(kptIdx.size()) < m_options.absPoseMinNumInliers) {
+        qDebug().noquote()
+            << QString("[注册] 图像 #%1 可用 2D-3D 对应=%2 (<%3)，跳过")
+                   .arg(imageId).arg(kptIdx.size())
+                   .arg(m_options.absPoseMinNumInliers);
+        return false;
+    }
+
+    std::vector<cv::Point2d> pts2d;
+    std::vector<cv::Point3d> pts3d;
+    pts2d.reserve(kptIdx.size());
+    pts3d.reserve(kptIdx.size());
+    for (size_t i = 0; i < kptIdx.size(); ++i) {
+        if (!m_obs->exists(pointId[i])) continue;
+        pts2d.push_back(m_obs->keypointPos(imageId, kptIdx[i]));
+        pts3d.push_back(m_obs->point(pointId[i]).position);
+    }
+
+    cv::Mat rvec, tvec;
+    std::vector<uchar> inlierMask;
+    const bool ok = resection((*m_poses)[static_cast<size_t>(imageId)].K,
+                              pts2d, pts3d, rvec, tvec, &inlierMask,
+                              m_options.absPoseMinNumInliers,
+                              m_options.absPoseMinInlierRatio,
+                              m_options.absPoseMaxErrorPx);
+    if (!ok) return false;
+
+    cv::Mat Rnew;
+    cv::Rodrigues(rvec, Rnew);
+    CameraPose &pose = (*m_poses)[static_cast<size_t>(imageId)];
+    pose.R = Rnew.clone();
+    pose.t = tvec.clone();
+    pose.registered = true;
+    m_registeredCameras.insert(imageId);
+    m_numRegTrials[static_cast<size_t>(imageId)] = 0;
+
+    qDebug().noquote()
+        << QString("[注册] 图像 #%1 注册成功（2D-3D=%2, 内点=%3），已注册 %4 台")
+               .arg(imageId).arg(pts2d.size())
+               .arg(std::count(inlierMask.begin(), inlierMask.end(), 1))
+               .arg(m_registeredCameras.size());
+
+    return true;
+}
+
+void Triangulate::triangulateAndRefineImage(int imageId)
+{
+    const size_t numTris = m_triangulator->triangulateImage(m_triOptions, imageId);
+    qDebug().noquote()
+        << QString("[三角化] 图像 #%1 新增/续接观测=%2，当前三维点=%3")
+               .arg(imageId).arg(static_cast<qlonglong>(numTris))
+               .arg(static_cast<qlonglong>(m_obs->numAlivePoints()));
+
+    iterativeLocalRefinement(imageId);
+    emitCurrentState(true);
+}
+
+void Triangulate::iterativeLocalRefinement(int imageId)
+{
+    for (int iter = 0; iter < m_options.baLocalMaxRefinements; ++iter) {
+        std::vector<int> variablePoints(m_triangulator->modifiedPoints().begin(),
+                                        m_triangulator->modifiedPoints().end());
+        if (variablePoints.empty()) break;
+
+        adjustLocalBundle(imageId, variablePoints);
+        if (m_lastLocalResiduals == 0) break;
+
+        // 变化率 = (合并 + 补全 + 过滤) / 参与优化的残差数
+        const double changed =
+            static_cast<double>(m_lastLocalChanged) /
+            static_cast<double>(m_lastLocalResiduals);
+        if (changed < m_options.baLocalMaxRefinementChange) break;
+    }
+    m_triangulator->clearModified();
+}
+
+void Triangulate::findLocalBundle(int imageId, std::vector<int> &outImageIds) const
+{
+    outImageIds.clear();
+
+    // 统计与 imageId 共享三维点最多的图像
+    std::vector<int> observed;
+    m_obs->collectObservedPoints(imageId, observed);
+
+    std::map<int, size_t> shared;
+    for (const int pid : observed) {
+        if (!m_obs->exists(pid)) continue;
+        for (const auto &obs : m_obs->point(pid).observations) {
+            if (obs.first == imageId) continue;
+            if (!(*m_poses)[static_cast<size_t>(obs.first)].registered) continue;
+            shared[obs.first] += 1;
         }
     }
 
-    return static_cast<int>(seenPointIds.size());
+    std::vector<std::pair<int, size_t>> ranked(shared.begin(), shared.end());
+    std::sort(ranked.begin(), ranked.end(),
+              [](const std::pair<int, size_t> &a, const std::pair<int, size_t> &b) {
+                  return a.second > b.second;
+              });
+
+    // 局部BA由「新图 + 最相关的 N-1 张图」组成（COLMAP ba_local_num_images）
+    const size_t limit = static_cast<size_t>(std::max(1, m_options.baLocalNumImages - 1));
+    for (size_t i = 0; i < ranked.size() && outImageIds.size() < limit; ++i) {
+        outImageIds.push_back(ranked[i].first);
+    }
+    outImageIds.push_back(imageId);
+}
+
+void Triangulate::collectObservations(const std::set<int> &imageSet,
+                                      const std::set<int> &pointSet,
+                                      std::vector<std::tuple<int, int, cv::Point2d>> &out) const
+{
+    out.clear();
+    const auto &points = m_obs->allPoints();
+    const auto &alive = m_obs->aliveMask();
+
+    for (size_t pid = 0; pid < points.size(); ++pid) {
+        if (!alive[pid]) continue;
+
+        const bool pointWanted = pointSet.empty() || pointSet.count(static_cast<int>(pid)) != 0;
+        for (const auto &obs : points[pid].observations) {
+            const bool imageWanted = imageSet.empty() || imageSet.count(obs.first) != 0;
+            if (!imageWanted && !pointWanted) continue;
+
+            out.emplace_back(obs.first, static_cast<int>(pid),
+                             m_obs->keypointPos(obs.first, obs.second));
+        }
+    }
+}
+
+void Triangulate::buildCameraParams(std::vector<std::array<double, 6>> &out) const
+{
+    const size_t n = m_poses->size();
+    out.assign(n, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+    for (size_t i = 0; i < n; ++i) {
+        const CameraPose &p = (*m_poses)[i];
+        const cv::Mat R = p.R.empty() ? cv::Mat::eye(3, 3, CV_64F) : p.R;
+        const cv::Mat t = p.t.empty() ? cv::Mat::zeros(3, 1, CV_64F) : p.t;
+
+        cv::Mat rvec;
+        cv::Rodrigues(R, rvec);
+        out[i] = {rvec.at<double>(0), rvec.at<double>(1), rvec.at<double>(2),
+                  t.at<double>(0), t.at<double>(1), t.at<double>(2)};
+    }
+}
+
+void Triangulate::buildPointParams(std::vector<std::array<double, 3>> &out) const
+{
+    const auto &points = m_obs->allPoints();
+    out.assign(points.size(), {0.0, 0.0, 0.0});
+    for (size_t i = 0; i < points.size(); ++i) {
+        out[i] = {points[i].position.x, points[i].position.y, points[i].position.z};
+    }
+}
+
+void Triangulate::applyCameraParams(const std::vector<std::array<double, 6>> &cameras,
+                                    const std::vector<char> &cameraVariable)
+{
+    for (size_t i = 0; i < cameras.size() && i < m_poses->size(); ++i) {
+        if (i < cameraVariable.size() && !cameraVariable[i]) continue;
+
+        const cv::Mat rvec = (cv::Mat_<double>(3, 1)
+                                  << cameras[i][0], cameras[i][1], cameras[i][2]);
+        cv::Mat R;
+        cv::Rodrigues(rvec, R);
+        (*m_poses)[i].R = R.clone();
+        (*m_poses)[i].t = (cv::Mat_<double>(3, 1)
+                               << cameras[i][3], cameras[i][4], cameras[i][5]);
+    }
+}
+
+void Triangulate::applyPointParams(const std::vector<std::array<double, 3>> &points)
+{
+    for (size_t i = 0; i < points.size() && i < m_obs->allPoints().size(); ++i) {
+        if (!m_obs->exists(static_cast<int>(i))) continue;
+        m_obs->point(static_cast<int>(i)).position =
+            cv::Point3d(points[i][0], points[i][1], points[i][2]);
+    }
+}
+
+void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds)
+{
+    m_lastLocalChanged = 0;
+    m_lastLocalResiduals = 0;
+
+    std::vector<int> localImages;
+    findLocalBundle(imageId, localImages);
+
+    const std::set<int> imageSet(localImages.begin(), localImages.end());
+
+    // COLMAP：只把「新点 / 短轨迹点」设为可变；长轨迹点已足够稳定
+    std::set<int> pointSet;
+    for (const int pid : variablePointIds) {
+        if (!m_obs->exists(pid)) continue;
+        if (m_obs->point(pid).observations.size() <=
+            static_cast<size_t>(m_options.baLocalMaxTrackLength)) {
+            pointSet.insert(pid);
+        }
+    }
+    if (pointSet.empty()) return;
+
+    std::vector<std::tuple<int, int, cv::Point2d>> observations;
+    collectObservations(imageSet, pointSet, observations);
+    if (observations.empty()) return;
+
+    std::vector<std::array<double, 6>> cameras;
+    std::vector<std::array<double, 3>> pointsArr;
+    buildCameraParams(cameras);
+    buildPointParams(pointsArr);
+
+    std::vector<char> cameraVariable(cameras.size(), 0);
+    for (const int cid : localImages) {
+        if (cid >= 0 && cid < static_cast<int>(cameraVariable.size())) {
+            cameraVariable[static_cast<size_t>(cid)] = 1;
+        }
+    }
+    // 参考相机固定（世界坐标系基准），否则整个局部系统存在规范自由度
+    cameraVariable[static_cast<size_t>(m_refCameraId)] = 0;
+
+    std::vector<char> pointVariable(pointsArr.size(), 0);
+    for (const int pid : pointSet) {
+        pointVariable[static_cast<size_t>(pid)] = 1;
+    }
+
+    BundleAdjustment::instance()->localBundleAdjustment(
+        cameras, pointsArr, observations,
+        m_K.at<double>(0, 0), m_K.at<double>(1, 1),
+        m_K.at<double>(0, 2), m_K.at<double>(1, 2),
+        cameraVariable, pointVariable, m_refCameraId);
+
+    applyCameraParams(cameras, cameraVariable);
+    applyPointParams(pointsArr);
+
+    // ── BA 之后：合并轨迹 → 补全轨迹 → 过滤外点 ──────────────────────────
+    size_t changed = observations.size();  // 参与优化的残差数作为变化率分母
+    m_lastLocalResiduals = observations.size();
+
+    if (m_options.enableTrackCompletion) {
+        const size_t merged = m_triangulator->mergeTracks(m_triOptions, variablePointIds);
+        const size_t completed = m_triangulator->completeTracks(m_triOptions, variablePointIds);
+        const size_t completedImg = m_triangulator->completeImage(m_triOptions, imageId);
+        qDebug().noquote()
+            << QString("[局部精化] 图像#%1: 合并=%2, 补全=%3, 补图=%4")
+                   .arg(imageId)
+                   .arg(static_cast<qlonglong>(merged))
+                   .arg(static_cast<qlonglong>(completed))
+                   .arg(static_cast<qlonglong>(completedImg));
+    }
+
+    const size_t filtered = m_obs->filterPoints3D(
+        m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
+        variablePointIds, *m_poses, m_K);
+    const size_t filteredImg = m_obs->filterPoints3DInImages(
+        m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
+        localImages, *m_poses, m_K);
+
+    m_lastLocalChanged = filtered + filteredImg;
+    Q_UNUSED(changed);
+}
+
+void Triangulate::runGlobalBundleAdjustment(bool fixIntrinsics)
+{
+    if (m_registeredCameras.size() < 2 || m_obs->numAlivePoints() == 0) return;
+
+    std::vector<std::tuple<int, int, cv::Point2d>> observations;
+    collectObservations(std::set<int>(), std::set<int>(), observations);
+    if (observations.empty()) return;
+
+    std::vector<std::array<double, 6>> cameras;
+    std::vector<std::array<double, 3>> pointsArr;
+    buildCameraParams(cameras);
+    buildPointParams(pointsArr);
+
+    std::vector<char> cameraVariable(cameras.size(), 0);
+    for (const int cid : m_registeredCameras) {
+        cameraVariable[static_cast<size_t>(cid)] = 1;
+    }
+
+    double fx = m_K.at<double>(0, 0);
+    double fy = m_K.at<double>(1, 1);
+    double cx = m_K.at<double>(0, 2);
+    double cy = m_K.at<double>(1, 2);
+
+    qDebug().noquote()
+        << QString("[BA全局] 相机=%1, 点=%2, 残差=%3")
+               .arg(m_registeredCameras.size())
+               .arg(static_cast<qlonglong>(m_obs->numAlivePoints()))
+               .arg(observations.size());
+
+    BundleAdjustment::instance()->globalBundleAdjustment(
+        cameras, pointsArr, observations, fx, fy, cx, cy,
+        fixIntrinsics, m_refCameraId, &cameraVariable);
+
+    applyCameraParams(cameras, cameraVariable);
+    applyPointParams(pointsArr);
+
+    m_K.at<double>(0, 0) = fx;
+    m_K.at<double>(1, 1) = fy;
+    m_K.at<double>(0, 2) = cx;
+    m_K.at<double>(1, 2) = cy;
+    for (auto &pose : *m_poses) {
+        pose.K = m_K.clone();
+    }
+    m_triangulator->setK(m_K);
+}
+
+size_t Triangulate::completeAndMergeTracks()
+{
+    size_t changed = 0;
+    changed += m_triangulator->completeAllTracks(m_triOptions);
+    changed += m_triangulator->mergeAllTracks(m_triOptions);
+    return changed;
+}
+
+void Triangulate::emitCurrentState(bool reset)
+{
+    std::vector<Point3D> points;
+    m_obs->compact(points);
+
+    QVector<float> pts, cls;
+    pts.reserve(static_cast<int>(points.size()) * 3);
+    cls.reserve(static_cast<int>(points.size()) * 3);
+    for (const auto &p : points) {
+        pts << static_cast<float>(p.position.x)
+            << static_cast<float>(p.position.y)
+            << static_cast<float>(p.position.z);
+        cls << p.color[2] / 255.0f
+            << p.color[1] / 255.0f
+            << p.color[0] / 255.0f;
+    }
+
+    QVector<float> camData;
+    camData.reserve(static_cast<int>(m_registeredCameras.size()) * 6);
+    for (const int camId : m_registeredCameras) {
+        const CameraPose &pose = (*m_poses)[static_cast<size_t>(camId)];
+        if (pose.R.empty() || pose.t.empty()) continue;
+        const cv::Mat C = -pose.R.t() * pose.t;
+        const cv::Mat fwd = pose.R.row(2).t();
+        camData << static_cast<float>(C.at<double>(0))
+                << static_cast<float>(C.at<double>(1))
+                << static_cast<float>(C.at<double>(2))
+                << static_cast<float>(fwd.at<double>(0))
+                << static_cast<float>(fwd.at<double>(1))
+                << static_cast<float>(fwd.at<double>(2));
+    }
+
+    m_lastEmittedPointCount = static_cast<int>(points.size());
+    emit incrementalUpdate(pts, cls, camData, reset);
 }
 
 /**
- * @brief 执行增量式三角测量重建（主入口）
+ * @brief 执行增量式三角测量重建（主入口）—— 阶段二：COLMAP 式增量重建
  *
- * 完整流程（阶段一改造后）：
- * 1. 使用 initResult 作为种子对，注册两张初始相机（世界坐标系 + 相对位姿）
- * 2. 候选排序：收集跨越已注册/未注册边界的边，按「可见三维点数」降序排列
- *    （对应 COLMAP FindNextImages / RankNextImageMaxVisiblePointsNum）；
- *    已失败过的边排到第二梯队，实现降级选择而非终止
- * 3. 尝试用 bestReg ↔ secondReg 三角化三视图共有点，产出本轮候选新点
- *    （共有点不足仅跳过新点三角化，**不再终止重建**）
- * 4. 跨**所有**已注册图像收集 nextImage 的 2D-3D 对应（含历史点与本轮新点）
- * 5. PnP 后方交会 + 质量校验 → 注册新相机
- * 6. 提交新点与观测，更新 kpTo3D，执行局部 BA
- * 7. 重复步骤 2-6，直到无可用候选（任一图像失败只记一次失败并换下一个候选）
- * 8. 全局 BA + 自标定精化（固定种子相机而非 index 0）
+ * 流程：
+ *  1. 构建特征轨迹对应图（CorrespondenceGraph）+ 观测管理器（ObservationManager）
+ *  2. 注册种子对（image1 = 世界原点，image2 = initResult 的相对位姿）
+ *  3. 对种子对三角化（TriangulateImage），随后全局BA + 过滤
+ *  4. 主循环：FindNextImages → RegisterNextImage → TriangulateImage →
+ *     IterativeLocalRefinement，直到没有图像能被注册
+ *  5. 收尾：CompleteAndMergeTracks + Retriangulate + IterativeGlobalRefinement
+ *
+ * 与阶段一的本质差异：注册一张新图**不再**要求任何三视图共有点，
+ * 只要它能看到 ≥ absPoseMinNumInliers 个已三角化点即可（COLMAP RegisterNextImage）。
+ * 所有三维点统一由 ObservationManager 持有，可被后续图像复用、补全与合并。
  */
 bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
                                const std::vector<FeatureResult> &features,
@@ -460,29 +749,55 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
                                bool fixIntrinsics,
                                const cv::Mat &externalK)
 {
+    Q_UNUSED(viewGraph);
+
     outPoints3D.clear();
     outCameraPoses.clear();
     m_lastEmittedPointCount = 0;
+    m_registeredCameras.clear();
 
     const int numImages = static_cast<int>(features.size());
     if (matchPairs.empty() || numImages < 3) {
+        qDebug().noquote() << "[三角测量] 输入不足（匹配对为空或图像少于 3 张）";
         return false;
     }
 
-    // 优先使用调用方提供的内参，保证与初始化阶段（findInitialPair）使用的 K 一致
-    cv::Mat K = externalK.empty() ? estimateK(features) : externalK.clone();
+    // ── 内参：优先使用调用方提供的，保证与初始化阶段一致 ──────────────────
+    m_K = externalK.empty() ? estimateK(features) : externalK.clone();
 
-    // ── 初始化所有相机的内参和默认外参 ──
-    outCameraPoses.resize(numImages);
+    m_matchPairs = &matchPairs;
+    m_features = &features;
+    m_poses = &outCameraPoses;
+
+    outCameraPoses.assign(static_cast<size_t>(numImages), CameraPose());
     for (int c = 0; c < numImages; ++c) {
-        outCameraPoses[c].imageId = c;
-        outCameraPoses[c].imageWidth = features[c].imageWidth;
-        outCameraPoses[c].imageHeight = features[c].imageHeight;
-        outCameraPoses[c].K = K.clone();
-        outCameraPoses[c].distortion = cv::Mat::zeros(5, 1, CV_64F);
+        CameraPose &pose = outCameraPoses[static_cast<size_t>(c)];
+        pose.imageId = c;
+        pose.imageWidth = features[static_cast<size_t>(c)].imageWidth;
+        pose.imageHeight = features[static_cast<size_t>(c)].imageHeight;
+        pose.K = m_K.clone();
+        pose.distortion = cv::Mat::zeros(5, 1, CV_64F);
+        pose.registered = false;
+    }
+    m_numRegTrials.assign(static_cast<size_t>(numImages), 0);
+
+    // ── 特征轨迹对应图 + 观测管理器 + 增量三角化器 ────────────────────────
+    std::vector<int> numKp(static_cast<size_t>(numImages), 0);
+    for (int i = 0; i < numImages; ++i) {
+        numKp[static_cast<size_t>(i)] =
+            static_cast<int>(features[static_cast<size_t>(i)].keypoints.size());
     }
 
-    // ── 种子对：第一张图像设为世界坐标系原点，第二张使用 initResult 的 R、t ──
+    m_graph = std::make_unique<CorrespondenceGraph>();
+    m_graph->build(matchPairs, numKp);
+    m_obs = std::make_unique<ObservationManager>(features, *m_graph);
+    m_triangulator = std::make_unique<IncrementalTriangulator>(
+        *m_graph, *m_obs, features, outCameraPoses, m_K);
+
+    qDebug().noquote()
+        << QString("[三角测量] 特征轨迹=%1, 图像=%2").arg(m_graph->numTracks()).arg(numImages);
+
+    // ── 注册种子对 ────────────────────────────────────────────────────────
     if (initResult.imageId1 < 0 || initResult.imageId1 >= numImages ||
         initResult.imageId2 < 0 || initResult.imageId2 >= numImages ||
         initResult.R.empty() || initResult.t.empty()) {
@@ -492,523 +807,146 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
 
     const int seedId1 = initResult.imageId1;
     const int seedId2 = initResult.imageId2;
+    m_refCameraId = seedId1;
 
-    outCameraPoses[seedId1].R = cv::Mat::eye(3, 3, CV_64F);
-    outCameraPoses[seedId1].t = cv::Mat::zeros(3, 1, CV_64F);
-    outCameraPoses[seedId1].registered = true;
-    outCameraPoses[seedId2].R = initResult.R.clone();
-    outCameraPoses[seedId2].t = initResult.t.clone();
-    outCameraPoses[seedId2].registered = true;
+    {
+        CameraPose &p1 = outCameraPoses[static_cast<size_t>(seedId1)];
+        p1.R = cv::Mat::eye(3, 3, CV_64F);
+        p1.t = cv::Mat::zeros(3, 1, CV_64F);
+        p1.registered = true;
 
-    std::set<int> registeredCameras;
-    registeredCameras.insert(seedId1);
-    registeredCameras.insert(seedId2);
+        CameraPose &p2 = outCameraPoses[static_cast<size_t>(seedId2)];
+        p2.R = initResult.R.clone();
+        p2.t = initResult.t.clone();
+        p2.registered = true;
+    }
+    m_registeredCameras.insert(seedId1);
+    m_registeredCameras.insert(seedId2);
 
-    // ── BA 观测数据：(imageId, point3DIdx, pixelCoord) ──
-    std::vector<std::tuple<int, int, cv::Point2d>> observations;
+    // ── 种子对三角化（COLMAP 用 init_min_tri_angle = 16°）─────────────────
+    {
+        TriangulatorOptions initOpts = m_triOptions;
+        initOpts.minAngleDeg = m_options.initMinTriAngleDeg;
 
-    // ── 关键点索引 → 三维点索引（按图像下标），阶段二 Track 管理的雏形 ──
-    std::vector<std::unordered_map<int, int>> kpTo3D(
-        static_cast<size_t>(numImages));
+        size_t numTris = m_triangulator->triangulateImage(initOpts, seedId1);
+        numTris += m_triangulator->triangulateImage(initOpts, seedId2);
 
-    // ── 匹配对查找表：O(1)  unordered (min,max) → MatchPair* ──
-    std::unordered_map<long long, const MatchPair *> pairLookup;
-    pairLookup.reserve(matchPairs.size() * 2);
-    for (const auto &mp : matchPairs) {
-        const int a = std::min(mp.imageId1, mp.imageId2);
-        const int b = std::max(mp.imageId1, mp.imageId2);
-        pairLookup[(static_cast<long long>(a) << 32) | static_cast<unsigned int>(b)] = &mp;
+        // 两视图轨迹被 ignore_two_view_tracks 全部挡掉时的兜底
+        if (m_obs->numAlivePoints() == 0 && m_options.allowTwoViewTracksFallback) {
+            qDebug().noquote()
+                << "[三角测量] 种子对按 COLMAP 默认（忽略两视图轨迹）无点，放宽后重试";
+            initOpts.ignoreTwoViewTracks = false;
+            numTris = m_triangulator->triangulateImage(initOpts, seedId1);
+            numTris += m_triangulator->triangulateImage(initOpts, seedId2);
+        }
+        m_triangulator->clearModified();
+
+        qDebug().noquote()
+            << QString("[三角测量] 种子对 #%1↔#%2 三角化观测=%3, 三维点=%4")
+                   .arg(seedId1).arg(seedId2)
+                   .arg(static_cast<qlonglong>(numTris))
+                   .arg(static_cast<qlonglong>(m_obs->numAlivePoints()));
     }
 
-    auto findMatchPair = [&pairLookup](int idA, int idB) -> const MatchPair * {
-        const int a = std::min(idA, idB);
-        const int b = std::max(idA, idB);
-        const auto it = pairLookup.find((static_cast<long long>(a) << 32) |
-                                        static_cast<unsigned int>(b));
-        return it == pairLookup.end() ? nullptr : it->second;
-    };
+    if (m_obs->numAlivePoints() == 0) {
+        qDebug().noquote() << "[三角测量] 种子对未能三角化出任何三维点，重建失败";
+        return false;
+    }
 
-    // ── 辅助：从匹配对中提取指定图像的关键点索引 ──
-    //  返回 (该图像的kpt索引, 另一张图像的kpt索引)
-    auto getKptIndices = [](const MatchPair &mp, int imageId) {
-        std::vector<std::pair<int, int>> result;
-        if (mp.imageId1 == imageId) {
-            for (const auto &m : mp.matches)
-                result.emplace_back(m.queryIdx, m.trainIdx);
-        } else {
-            for (const auto &m : mp.matches)
-                result.emplace_back(m.trainIdx, m.queryIdx);
-        }
-        return result;
-    };
-
-    // ── 失败计数：(待注册图像, 已注册图像) → 已尝试次数 ──
-    std::map<std::pair<int, int>, int> failedCount;
-
-    struct EdgeCand {
-        int unreg = -1;
-        int reg = -1;
-        int matchCount = 0;
-        int visible = 0;
-    };
-
-    // ── 收集跨边界候选边并按优先级排序 ──
-    //  第一梯队：未失败过的边，按可见三维点数降序（点数相同则按匹配数降序）
-    //  第二梯队：失败过但未达上限的边 —— 实现降级重试而非终止重建
-    auto collectCandidates = [&]() -> std::vector<EdgeCand> {
-        std::vector<EdgeCand> raw;
-        for (const auto &edge : viewGraph.edges) {
-            const bool aReg = registeredCameras.count(edge.nodeA) != 0;
-            const bool bReg = registeredCameras.count(edge.nodeB) != 0;
-            if (aReg == bReg) continue;
-
-            const int regNode = aReg ? edge.nodeA : edge.nodeB;
-            const int unregNode = aReg ? edge.nodeB : edge.nodeA;
-
-            const auto it = failedCount.find({unregNode, regNode});
-            if (it != failedCount.end() && it->second >= m_options.maxRegTrials) continue;
-
-            raw.push_back({unregNode, regNode, edge.matchCount, 0});
-        }
-
-        // 同一待注册图像只保留匹配数最大的边
-        std::sort(raw.begin(), raw.end(),
-                  [](const EdgeCand &a, const EdgeCand &b) {
-                      return a.matchCount > b.matchCount;
-                  });
-        std::vector<EdgeCand> uniq;
-        std::set<int> seenUnreg;
-        for (const auto &c : raw) {
-            if (seenUnreg.insert(c.unreg).second) uniq.push_back(c);
-        }
-
-        for (auto &c : uniq) {
-            c.visible = numVisiblePoints3D(c.unreg, kpTo3D, registeredCameras, findMatchPair);
-        }
-
-        std::vector<EdgeCand> fresh, retried;
-        for (const auto &c : uniq) {
-            const auto it = failedCount.find({c.unreg, c.reg});
-            const bool alreadyFailed = (it != failedCount.end() && it->second > 0);
-            (alreadyFailed ? retried : fresh).push_back(c);
-        }
-
-        const auto byVisible = [](const EdgeCand &a, const EdgeCand &b) {
-            if (a.visible != b.visible) return a.visible > b.visible;
-            return a.matchCount > b.matchCount;
-        };
-        std::sort(fresh.begin(), fresh.end(), byVisible);
-        std::sort(retried.begin(), retried.end(), byVisible);
-
-        fresh.insert(fresh.end(), retried.begin(), retried.end());
-        return fresh;
-    };
+    // ── 初始全局BA + 过滤（首轮放宽阈值：内参尚未标定好）──────────────────
+    runGlobalBundleAdjustment(fixIntrinsics);
+    m_obs->filterAllPoints3D(m_options.initialFilterMaxReprojErrorPx,
+                             m_options.filterMinTriAngleDeg,
+                             outCameraPoses, m_K);
+    if (m_obs->numAlivePoints() == 0) {
+        qDebug().noquote() << "[三角测量] 初始全局BA后无有效三维点，重建失败";
+        return false;
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     //  增量注册主循环
     // ═══════════════════════════════════════════════════════════════════════
     while (true) {
-        const std::vector<EdgeCand> candidates = collectCandidates();
-        if (candidates.empty()) {
+        const std::vector<std::pair<int, int>> ranked = findNextImages();
+        if (ranked.empty()) {
             qDebug().noquote() << "[三角测量] 无更多可注册图像";
             break;
         }
 
-        const EdgeCand &cand = candidates.front();
-        const int nextImage = cand.unreg;
-        const int bestReg   = cand.reg;
+        bool registeredAny = false;
+        for (const auto &cand : ranked) {
+            const int visible = cand.first;
+            const int imageId = cand.second;
 
-        qDebug().noquote()
-            << QString("[三角测量] 选择图像 #%1 (bestReg=#%2, 可见三维点=%3, 匹配数=%4)")
-                   .arg(nextImage).arg(bestReg).arg(cand.visible).arg(cand.matchCount);
+            // 排序为降序，后面的候选可见点数只会更少
+            if (visible < m_options.absPoseMinNumInliers) break;
 
-        // ── 尝试三角化新点：bestReg ↔ secondReg 的三视图共有点 ──
-        //  这是"新增三维点"的途径；共有点不足时仅跳过，仍可用历史点注册本图。
-        std::vector<cv::Point3d> newPt3d;
-        std::vector<int> newPtKptBest;    // 新点在 bestReg 上的关键点索引
-        std::vector<int> newPtKptSecond;  // 新点在 secondReg 上的关键点索引
-        std::vector<int> newPtKptNext;    // 新点在 nextImage 上的关键点索引
-        int secondReg = -1;
-
-        {
-            int secondRegMatchCount = 0;
-            for (int regId : registeredCameras) {
-                if (regId == bestReg) continue;
-                const MatchPair *mp = findMatchPair(regId, bestReg);
-                if (mp && mp->matchCount > secondRegMatchCount) {
-                    secondRegMatchCount = mp->matchCount;
-                    secondReg = regId;
-                }
+            if (registerNextImage(imageId)) {
+                triangulateAndRefineImage(imageId);
+                registeredAny = true;
+                break;
             }
+            ++m_numRegTrials[static_cast<size_t>(imageId)];
         }
 
-        const MatchPair *mpReg = (secondReg >= 0) ? findMatchPair(bestReg, secondReg) : nullptr;
-        const MatchPair *mpNew = findMatchPair(bestReg, nextImage);
-
-        if (mpReg && mpNew) {
-            const auto indicesReg = getKptIndices(*mpReg, bestReg);
-            const auto indicesNew = getKptIndices(*mpNew, bestReg);
-
-            std::unordered_map<int, int> regLookup;
-            regLookup.reserve(indicesReg.size());
-            for (const auto &kv : indicesReg) regLookup[kv.first] = kv.second;
-
-            for (const auto &kv : indicesNew) {
-                const auto it = regLookup.find(kv.first);
-                if (it == regLookup.end()) continue;
-                newPtKptBest.push_back(kv.first);    // bestReg
-                newPtKptSecond.push_back(it->second); // secondReg
-                newPtKptNext.push_back(kv.second);    // nextImage
-            }
-        }
-
-        const int commonCount = static_cast<int>(newPtKptBest.size());
-        if (commonCount < m_options.minCommonPoints) {
-            qDebug().noquote()
-                << QString("[三角测量] 图像 #%1 三视图共有点=%2 (<%3)，跳过新点三角化，"
-                           "改用历史三维点注册")
-                       .arg(nextImage).arg(commonCount).arg(m_options.minCommonPoints);
-            newPtKptBest.clear();
-            newPtKptSecond.clear();
-            newPtKptNext.clear();
-        } else {
-            const cv::Mat R1 = outCameraPoses[bestReg].R.clone();
-            const cv::Mat t1 = outCameraPoses[bestReg].t.clone();
-            const cv::Mat R2 = outCameraPoses[secondReg].R.clone();
-            const cv::Mat t2 = outCameraPoses[secondReg].t.clone();
-
-            MatchPair tempPair;
-            tempPair.imageId1 = bestReg;
-            tempPair.imageId2 = secondReg;
-            for (int idx : newPtKptBest)
-                tempPair.points1.push_back(features[bestReg].keypoints[idx].pt);
-            for (int idx : newPtKptSecond)
-                tempPair.points2.push_back(features[secondReg].keypoints[idx].pt);
-            for (int k = 0; k < commonCount; ++k)
-                tempPair.matches.push_back(cv::DMatch(k, k, 0));
-
-            std::vector<bool> keepMask;
-            triangulatePair(tempPair, K, K, R1, t1, R2, t2, newPt3d, &keepMask);
-
-            const auto filterByMask = [&keepMask](std::vector<int> &vec) {
-                std::vector<int> filtered;
-                for (size_t k = 0; k < vec.size() && k < keepMask.size(); ++k) {
-                    if (keepMask[k]) filtered.push_back(vec[k]);
-                }
-                vec = std::move(filtered);
-            };
-            filterByMask(newPtKptBest);
-            filterByMask(newPtKptSecond);
-            filterByMask(newPtKptNext);
-        }
-
-        // ── 暂存本轮新点（PnP 失败时回滚）──
-        const int basePointIdx = static_cast<int>(outPoints3D.size());
-        const int baseObservationIdx = static_cast<int>(observations.size());
-        const cv::Mat &bestImg = features[bestReg].imageData;
-        for (size_t i = 0; i < newPt3d.size(); ++i) {
-            Point3D pt;
-            pt.id = static_cast<int>(outPoints3D.size());
-            pt.position = newPt3d[i];
-            pt.color = cv::Vec3b(128, 128, 128);
-            if (i < newPtKptBest.size() && !bestImg.empty()) {
-                const cv::KeyPoint &kp = features[bestReg].keypoints[newPtKptBest[i]];
-                const int px = static_cast<int>(kp.pt.x + 0.5);
-                const int py = static_cast<int>(kp.pt.y + 0.5);
-                if (py >= 0 && py < bestImg.rows && px >= 0 && px < bestImg.cols) {
-                    pt.color = bestImg.at<cv::Vec3b>(py, px);
-                }
-            }
-            outPoints3D.push_back(pt);
-        }
-
-        // ── 把新点登记进 kpTo3D（三张图上的关键点都登记，供后续图像复用）──
-        std::vector<std::pair<int, int>> addedKpTo3D;
-        const auto stageKpTo3D = [&](int img, int kpt, int ptIdx) {
-            kpTo3D[img][kpt] = ptIdx;
-            addedKpTo3D.emplace_back(img, kpt);
-        };
-        for (size_t i = 0; i < newPt3d.size(); ++i) {
-            const int ptIdx = basePointIdx + static_cast<int>(i);
-            if (i < newPtKptBest.size())   stageKpTo3D(bestReg,   newPtKptBest[i],   ptIdx);
-            if (i < newPtKptSecond.size()) stageKpTo3D(secondReg, newPtKptSecond[i], ptIdx);
-            if (i < newPtKptNext.size())   stageKpTo3D(nextImage, newPtKptNext[i],   ptIdx);
-        }
-
-        const auto rollback = [&]() {
-            outPoints3D.resize(static_cast<size_t>(basePointIdx));
-            observations.resize(static_cast<size_t>(baseObservationIdx));
-            for (const auto &kv : addedKpTo3D) kpTo3D[kv.first].erase(kv.second);
-            addedKpTo3D.clear();
-        };
-
-        // ── 跨所有已注册图像收集 nextImage 的 2D-3D 对应 ──
-        //  对应 COLMAP RegisterNextImage：不再局限于本轮新算的点，
-        //  历史已三角化点同样可用于注册，显著提升大视角数据集的注册率。
-        std::vector<cv::Point2d> corr2d;
-        std::vector<int> corrPtIdx;
-        {
-            std::set<int> usedPt;
-            for (int regId : registeredCameras) {
-                if (regId == nextImage) continue;
-                const MatchPair *mp = findMatchPair(regId, nextImage);
-                if (!mp) continue;
-                for (const auto &kv : getKptIndices(*mp, nextImage)) {
-                    const int kptNext = kv.first;
-                    const int kptReg  = kv.second;
-                    const auto it = kpTo3D[regId].find(kptReg);
-                    if (it == kpTo3D[regId].end()) continue;
-                    if (!usedPt.insert(it->second).second) continue;
-                    corr2d.push_back(features[nextImage].keypoints[kptNext].pt);
-                    corrPtIdx.push_back(it->second);
-                }
-            }
-        }
-
-        if (static_cast<int>(corr2d.size()) < m_options.absPoseMinNumInliers) {
-            qDebug().noquote()
-                << QString("[三角测量] 图像 #%1 可用 2D-3D 对应=%2 (<%3)，标记该边失败并换候选")
-                       .arg(nextImage).arg(corr2d.size())
-                       .arg(m_options.absPoseMinNumInliers);
-            rollback();
-            failedCount[{nextImage, bestReg}] += 1;
-            continue;
-        }
-
-        std::vector<cv::Point3d> corr3d;
-        corr3d.reserve(corrPtIdx.size());
-        for (int pi : corrPtIdx) corr3d.push_back(outPoints3D[pi].position);
-
-        // ── PnP 后方交会注册新相机 ──
-        cv::Mat rvec, tvec;
-        std::vector<uchar> inlierMask;
-        const bool poseOk = resection(outCameraPoses[nextImage].K, corr2d, corr3d,
-                                      rvec, tvec, &inlierMask,
-                                      m_options.absPoseMinNumInliers,
-                                      m_options.absPoseMinInlierRatio,
-                                      m_options.absPoseMaxErrorPx);
-
-        if (!poseOk) {
-            qDebug().noquote()
-                << QString("[三角测量] PnP 注册相机 #%1 失败 (bestReg=#%2)，换次优候选")
-                       .arg(nextImage).arg(bestReg);
-            rollback();
-            failedCount[{nextImage, bestReg}] += 1;
-            continue;
-        }
-
-        cv::Mat Rnew;
-        cv::Rodrigues(rvec, Rnew);
-        outCameraPoses[nextImage].R = Rnew.clone();
-        outCameraPoses[nextImage].t = tvec.clone();
-        outCameraPoses[nextImage].registered = true;
-        registeredCameras.insert(nextImage);
-        addedKpTo3D.clear();  // 提交：新点的 kpTo3D 记录保留
-
-        // 注册成功：清除该图像作为"待注册端"的失败记录
-        for (auto it = failedCount.begin(); it != failedCount.end(); ) {
-            it = (it->first.first == nextImage) ? failedCount.erase(it) : std::next(it);
-        }
-
-        // ── 记录观测 ──
-        //  1) 新点在 bestReg / secondReg 上的观测
-        for (size_t i = 0; i < newPt3d.size(); ++i) {
-            const int ptIdx = basePointIdx + static_cast<int>(i);
-            if (i < newPtKptBest.size()) {
-                const auto &kp = features[bestReg].keypoints[newPtKptBest[i]];
-                observations.emplace_back(bestReg, ptIdx, cv::Point2d(kp.pt.x, kp.pt.y));
-            }
-            if (secondReg >= 0 && i < newPtKptSecond.size()) {
-                const auto &kp = features[secondReg].keypoints[newPtKptSecond[i]];
-                observations.emplace_back(secondReg, ptIdx, cv::Point2d(kp.pt.x, kp.pt.y));
-            }
-        }
-        //  2) nextImage 对所有内点（含历史点）的观测
-        for (size_t k = 0; k < corr2d.size(); ++k) {
-            if (k >= inlierMask.size() || !inlierMask[k]) continue;
-            observations.emplace_back(nextImage, corrPtIdx[k], corr2d[k]);
-        }
-
-        qDebug().noquote()
-            << QString("[三角测量] PnP 注册相机 #%1 成功（2D-3D 对应=%2, 本轮新点=%3）")
-                   .arg(nextImage).arg(corr2d.size()).arg(newPt3d.size());
-
-        // ── 局部 BA：优化新相机 + 本轮新点（其余固定）──
-        {
-            std::vector<std::array<double, 6>> cameras(static_cast<size_t>(numImages));
-            for (int c = 0; c < numImages; ++c) {
-                cv::Mat rvecC;
-                const cv::Mat Rc = outCameraPoses[c].R.empty()
-                                       ? cv::Mat::eye(3, 3, CV_64F) : outCameraPoses[c].R;
-                const cv::Mat tc = outCameraPoses[c].t.empty()
-                                       ? cv::Mat::zeros(3, 1, CV_64F) : outCameraPoses[c].t;
-                cv::Rodrigues(Rc, rvecC);
-                cameras[c] = {rvecC.at<double>(0), rvecC.at<double>(1), rvecC.at<double>(2),
-                              tc.at<double>(0), tc.at<double>(1), tc.at<double>(2)};
-            }
-
-            std::vector<std::array<double, 3>> ptsGlobal;
-            ptsGlobal.reserve(outPoints3D.size());
-            for (const auto &p : outPoints3D) {
-                ptsGlobal.push_back({p.position.x, p.position.y, p.position.z});
-            }
-
-            BundleAdjustment::instance()->bundleAdjustment(
-                cameras, ptsGlobal, observations,
-                K.at<double>(0, 0), K.at<double>(1, 1),
-                K.at<double>(0, 2), K.at<double>(1, 2),
-                nextImage, basePointIdx);
-
-            cv::Mat rvecUpdated = (cv::Mat_<double>(3, 1) <<
-                cameras[nextImage][0], cameras[nextImage][1], cameras[nextImage][2]);
-            cv::Mat Rj;
-            cv::Rodrigues(rvecUpdated, Rj);
-            outCameraPoses[nextImage].R = Rj.clone();
-            outCameraPoses[nextImage].t = (cv::Mat_<double>(3, 1) <<
-                cameras[nextImage][3], cameras[nextImage][4], cameras[nextImage][5]);
-
-            for (size_t k = 0; k < ptsGlobal.size(); ++k) {
-                outPoints3D[k].position = cv::Point3d(
-                    ptsGlobal[k][0], ptsGlobal[k][1], ptsGlobal[k][2]);
-            }
-        }
-
-        // ── 实时推送增量更新（只发新增点）──
-        {
-            QVector<float> pts, cls;
-            const int startIdx = m_lastEmittedPointCount;
-            pts.reserve(static_cast<int>(outPoints3D.size() - startIdx) * 3);
-            cls.reserve(static_cast<int>(outPoints3D.size() - startIdx) * 3);
-            for (size_t i = static_cast<size_t>(startIdx); i < outPoints3D.size(); ++i) {
-                const auto &p = outPoints3D[i];
-                pts << static_cast<float>(p.position.x)
-                    << static_cast<float>(p.position.y)
-                    << static_cast<float>(p.position.z);
-                cls << p.color[2] / 255.0f
-                    << p.color[1] / 255.0f
-                    << p.color[0] / 255.0f;
-            }
-            m_lastEmittedPointCount = static_cast<int>(outPoints3D.size());
-
-            QVector<float> camData;
-            camData.reserve(registeredCameras.size() * 6);
-            for (int camId : registeredCameras) {
-                const cv::Mat C = -outCameraPoses[camId].R.t() * outCameraPoses[camId].t;
-                const cv::Mat fwd = outCameraPoses[camId].R.row(2).t();
-                camData << static_cast<float>(C.at<double>(0))
-                        << static_cast<float>(C.at<double>(1))
-                        << static_cast<float>(C.at<double>(2))
-                        << static_cast<float>(fwd.at<double>(0))
-                        << static_cast<float>(fwd.at<double>(1))
-                        << static_cast<float>(fwd.at<double>(2));
-            }
-            emit incrementalUpdate(pts, cls, camData, startIdx == 0);
+        if (!registeredAny) {
+            qDebug().noquote() << "[三角测量] 本轮所有候选均注册失败，结束增量注册";
+            break;
         }
     }
 
-    if (outPoints3D.empty() || registeredCameras.size() < 3) {
+    // ═══════════════════════════════════════════════════════════════════════
+    //  收尾：补全/合并 → 重三角化 → 迭代全局BA
+    // ═══════════════════════════════════════════════════════════════════════
+    if (m_options.enableTrackCompletion) {
+        const size_t changed = completeAndMergeTracks();
+        qDebug().noquote()
+            << QString("[收尾] 补全+合并观测=%1").arg(static_cast<qlonglong>(changed));
+    }
+
+    if (m_options.enableRetriangulation) {
+        const size_t numRe = m_triangulator->retriangulate(m_triOptions, matchPairs);
+        qDebug().noquote()
+            << QString("[收尾] 重三角化观测=%1").arg(static_cast<qlonglong>(numRe));
+    }
+
+    for (int iter = 0; iter < m_options.globalMaxRefinements; ++iter) {
+        const size_t numObsBefore = m_obs->totalObservations();
+        if (numObsBefore == 0) break;
+
+        runGlobalBundleAdjustment(fixIntrinsics);
+
+        size_t changed = m_options.enableTrackCompletion ? completeAndMergeTracks() : 0;
+        changed += m_obs->filterAllPoints3D(m_options.filterMaxReprojErrorPx,
+                                            m_options.filterMinTriAngleDeg,
+                                            outCameraPoses, m_K);
+
+        const double ratio = static_cast<double>(changed) /
+                             static_cast<double>(std::max<size_t>(1, numObsBefore));
+        qDebug().noquote()
+            << QString("[收尾] 全局精化第%1轮: 变化=%2/%3 (%4)")
+                   .arg(iter + 1)
+                   .arg(static_cast<qlonglong>(changed))
+                   .arg(static_cast<qlonglong>(numObsBefore))
+                   .arg(ratio, 0, 'f', 4);
+
+        if (ratio < m_options.globalMaxRefinementChange) break;
+    }
+    m_triangulator->clearModified();
+
+    // ── 输出 ──────────────────────────────────────────────────────────────
+    m_obs->compact(outPoints3D);
+    emitCurrentState(true);
+
+    if (outPoints3D.empty() || m_registeredCameras.size() < 3) {
         qDebug().noquote()
             << QString("[三角测量] 重建失败: 三维点=%1, 已注册相机=%2")
-                   .arg(outPoints3D.size()).arg(registeredCameras.size());
+                   .arg(outPoints3D.size()).arg(m_registeredCameras.size());
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  全局 BA + 自标定精化
-    //  固定种子图像（世界坐标系参考）而非 index 0；未注册相机不参与优化
-    // ═══════════════════════════════════════════════════════════════════════
-    {
-        std::vector<std::array<double, 6>> cameras(static_cast<size_t>(numImages));
-        std::vector<char> cameraVariable(static_cast<size_t>(numImages), 0);
-        for (int c = 0; c < numImages; ++c) {
-            cv::Mat rvecC;
-            const cv::Mat Rc = outCameraPoses[c].R.empty()
-                                   ? cv::Mat::eye(3, 3, CV_64F) : outCameraPoses[c].R;
-            const cv::Mat tc = outCameraPoses[c].t.empty()
-                                   ? cv::Mat::zeros(3, 1, CV_64F) : outCameraPoses[c].t;
-            cv::Rodrigues(Rc, rvecC);
-            cameras[c] = {rvecC.at<double>(0), rvecC.at<double>(1), rvecC.at<double>(2),
-                          tc.at<double>(0), tc.at<double>(1), tc.at<double>(2)};
-            cameraVariable[c] = outCameraPoses[c].registered ? 1 : 0;
-        }
-
-        std::vector<std::array<double, 3>> ptsGlobal;
-        ptsGlobal.reserve(outPoints3D.size());
-        for (const auto &p : outPoints3D) {
-            ptsGlobal.push_back({p.position.x, p.position.y, p.position.z});
-        }
-
-        qDebug().noquote()
-            << QString("[三角测量] 全局BA+自标定: %1 相机, %2 点")
-                   .arg(registeredCameras.size())
-                   .arg(outPoints3D.size());
-
-        double fx = K.at<double>(0, 0);
-        double fy = K.at<double>(1, 1);
-        double cx = K.at<double>(0, 2);
-        double cy = K.at<double>(1, 2);
-
-        BundleAdjustment::instance()->globalBundleAdjustment(
-            cameras, ptsGlobal, observations,
-            fx, fy, cx, cy, fixIntrinsics,
-            seedId1, &cameraVariable);
-
-        for (int c = 0; c < numImages; ++c) {
-            if (!cameraVariable[c]) continue;
-            const cv::Mat rvecC = (cv::Mat_<double>(3, 1) <<
-                                       cameras[c][0], cameras[c][1], cameras[c][2]);
-            cv::Mat Rc;
-            cv::Rodrigues(rvecC, Rc);
-            outCameraPoses[c].R = Rc.clone();
-            outCameraPoses[c].t = (cv::Mat_<double>(3, 1) <<
-                                       cameras[c][3], cameras[c][4], cameras[c][5]);
-        }
-
-        for (size_t k = 0; k < ptsGlobal.size(); ++k) {
-            outPoints3D[k].position = cv::Point3d(
-                ptsGlobal[k][0], ptsGlobal[k][1], ptsGlobal[k][2]);
-        }
-
-        K.at<double>(0, 0) = fx;
-        K.at<double>(1, 1) = fy;
-        K.at<double>(0, 2) = cx;
-        K.at<double>(1, 2) = cy;
-        for (int c = 0; c < numImages; ++c) {
-            outCameraPoses[c].K = K.clone();
-        }
-
-        // ── 全局BA完成后推送全量更新 ──
-        QVector<float> pts, cls;
-        pts.reserve(static_cast<int>(outPoints3D.size()) * 3);
-        cls.reserve(static_cast<int>(outPoints3D.size()) * 3);
-        for (const auto &p : outPoints3D) {
-            pts << static_cast<float>(p.position.x)
-                << static_cast<float>(p.position.y)
-                << static_cast<float>(p.position.z);
-            cls << p.color[2] / 255.0f
-                << p.color[1] / 255.0f
-                << p.color[0] / 255.0f;
-        }
-        QVector<float> camData;
-        camData.reserve(registeredCameras.size() * 6);
-        for (int camId : registeredCameras) {
-            const cv::Mat C = -outCameraPoses[camId].R.t() * outCameraPoses[camId].t;
-            const cv::Mat fwd = outCameraPoses[camId].R.row(2).t();
-            camData << static_cast<float>(C.at<double>(0))
-                    << static_cast<float>(C.at<double>(1))
-                    << static_cast<float>(C.at<double>(2))
-                    << static_cast<float>(fwd.at<double>(0))
-                    << static_cast<float>(fwd.at<double>(1))
-                    << static_cast<float>(fwd.at<double>(2));
-        }
-        m_lastEmittedPointCount = static_cast<int>(outPoints3D.size());
-        emit incrementalUpdate(pts, cls, camData, true);
-    }
-
     qDebug().noquote()
-        << QString("[三角测量] 重建完成: 已注册相机=%1/%2, 三维点总数=%3")
-               .arg(registeredCameras.size()).arg(numImages).arg(outPoints3D.size());
-
+        << QString("[三角测量] 重建完成: 已注册相机=%1/%2, 三维点=%3")
+               .arg(m_registeredCameras.size()).arg(numImages).arg(outPoints3D.size());
     return true;
 }
-

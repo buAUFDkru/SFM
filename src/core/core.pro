@@ -27,6 +27,10 @@ HEADERS += \
     data/StereoTypes.h \
     algorithm/ThreadPool.h \
     algorithm/SfmLogger.h \
+    algorithm/SfmGeometry.h \
+    algorithm/CorrespondenceGraph.h \
+    algorithm/ObservationManager.h \
+    algorithm/IncrementalTriangulator.h \
     algorithm/Initialization.h \
     algorithm/MatcherService.h \
     algorithm/BundleAdjustment.h \
@@ -50,6 +54,9 @@ SOURCES += \
     builtin/registerBuiltIn.cpp \
     algorithm/ThreadPool.cpp \
     algorithm/SfmLogger.cpp \
+    algorithm/CorrespondenceGraph.cpp \
+    algorithm/ObservationManager.cpp \
+    algorithm/IncrementalTriangulator.cpp \
     algorithm/Initialization.cpp \
     algorithm/MatcherService.cpp \
     algorithm/BundleAdjustment.cpp \

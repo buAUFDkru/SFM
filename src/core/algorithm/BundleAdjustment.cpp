@@ -127,34 +127,53 @@ struct SelfCalibReprojectionError
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  bundleAdjustment —— 局部BA
+//  localBundleAdjustment —— 局部BA（可变相机集合 + 可变点集合）
 // ══════════════════════════════════════════════════════════════════════════════
 
-bool BundleAdjustment::bundleAdjustment(
+bool BundleAdjustment::localBundleAdjustment(
     std::vector<std::array<double, 6>> &cameras,
     std::vector<std::array<double, 3>> &points3d,
     const std::vector<std::tuple<int, int, cv::Point2d>> &observations,
     double fx, double fy, double cx, double cy,
-    int newCameraIdx, int newPointStartIdx)
+    const std::vector<char> &cameraVariable,
+    const std::vector<char> &pointVariable,
+    int refCameraIdx)
 {
     if (cameras.size() < 2 || points3d.empty() || observations.empty())
         return false;
 
     ceres::Problem problem;
 
+    const bool hasCamMask = (cameraVariable.size() == cameras.size());
+    const bool hasPtMask  = (pointVariable.size() == points3d.size());
+
+    size_t numVarCameras = 0;
     for (size_t i = 0; i < cameras.size(); ++i) {
         problem.AddParameterBlock(cameras[i].data(), 6);
-        if (static_cast<int>(i) != newCameraIdx) {
+
+        const bool isRef = (refCameraIdx >= 0 && static_cast<int>(i) == refCameraIdx);
+        const bool variable = hasCamMask ? (cameraVariable[i] != 0) : true;
+
+        if (!variable || isRef) {
             problem.SetParameterBlockConstant(cameras[i].data());
+        } else {
+            ++numVarCameras;
         }
     }
 
+    size_t numVarPoints = 0;
     for (size_t i = 0; i < points3d.size(); ++i) {
         problem.AddParameterBlock(points3d[i].data(), 3);
-        if (static_cast<int>(i) < newPointStartIdx) {
+
+        const bool variable = hasPtMask ? (pointVariable[i] != 0) : true;
+        if (!variable) {
             problem.SetParameterBlockConstant(points3d[i].data());
+        } else {
+            ++numVarPoints;
         }
     }
+
+    if (numVarCameras == 0 && numVarPoints == 0) return false;
 
     ceres::LossFunction *loss = new ceres::HuberLoss(4.0);
 
@@ -187,8 +206,11 @@ bool BundleAdjustment::bundleAdjustment(
     ceres::Solve(options, &problem, &summary);
 
     qDebug().noquote()
-        << QString("[BA局部] 相机#%1, 收敛=%2, %3次迭代, 初始代价=%4, 最终代价=%5")
-               .arg(newCameraIdx)
+        << QString("[BA局部] 可变相机=%1, 可变点=%2, 残差=%3, 收敛=%4, %5次迭代, "
+                   "初始代价=%6, 最终代价=%7")
+               .arg(static_cast<qlonglong>(numVarCameras))
+               .arg(static_cast<qlonglong>(numVarPoints))
+               .arg(problem.NumResidualBlocks() * 2)
                .arg(summary.termination_type == ceres::CONVERGENCE)
                .arg(summary.iterations.size())
                .arg(summary.initial_cost, 0, 'e', 3)

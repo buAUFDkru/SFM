@@ -25,9 +25,14 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 
+#include <algorithm>
+
 #include "algorithm/Initialization.h"
 #include "algorithm/MatcherService.h"
 #include "algorithm/Triangulate.h"
+#include "algorithm/CorrespondenceGraph.h"
+#include "algorithm/ObservationManager.h"
+#include "algorithm/IncrementalTriangulator.h"
 #include "data/SfmTypes.h"
 
 namespace {
@@ -158,6 +163,13 @@ int main(int argc, char **argv)
         }
     }
 
+    // ── 4 相机场景的特征轨迹对应图（阶段二测试用）─────────────────────────
+    CorrespondenceGraph graph4;
+    {
+        std::vector<int> numKp4(static_cast<size_t>(numCams), numPts);
+        graph4.build(matchPairs, numKp4);
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     std::printf("\n[1] TriangulateOptions 默认值（对齐 COLMAP）\n");
     // ═════════════════════════════════════════════════════════════════════
@@ -261,6 +273,153 @@ int main(int argc, char **argv)
         // 旧的严格阈值（50 / 0.05）下，30 个匹配会被拒绝 —— 说明宽基线场景确实被放宽所救
         mp.matchCount = 30;
         check(!svc.shouldAddEdge(mp, fs, 50, 0.05), "旧阈值 50/0.05 下 30 匹配被拒（对照）");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[5] CorrespondenceGraph：并查集合并特征轨迹\n");
+    // ═════════════════════════════════════════════════════════════════════
+    CorrespondenceGraph graph;
+    {
+        // 3 张图 × 5 个关键点
+        //  kpt0：三视图轨迹（0↔1↔2）
+        //  kpt1：两视图轨迹（0↔1）
+        std::vector<MatchPair> mps;
+        auto addPair = [&](int a, int b, std::vector<std::pair<int, int>> pairs) {
+            MatchPair mp;
+            mp.imageId1 = a;
+            mp.imageId2 = b;
+            for (const auto &pr : pairs) {
+                mp.matches.emplace_back(pr.first, pr.second, 0.0f);
+            }
+            mp.matchCount = static_cast<int>(pairs.size());
+            mps.push_back(mp);
+        };
+        addPair(0, 1, {{0, 0}, {1, 1}});
+        addPair(1, 2, {{0, 0}});
+
+        graph.build(mps, {5, 5, 5});
+
+        check(graph.numTracks() == 2,
+              QString("轨迹数 == 2 (实际 %1)").arg(graph.numTracks()));
+        check(graph.hasCorrespondences(0, 0) && !graph.hasCorrespondences(0, 4),
+              "孤立关键点无对应，参与匹配的关键点有对应");
+
+        std::vector<CorrespondenceGraph::Observation> corrs;
+        graph.findCorrespondences(0, 0, &corrs);
+        check(corrs.size() == 2,
+              QString("kpt0 的直接对应 == 2 条 (实际 %1)").arg(corrs.size()));
+
+        check(!graph.isTwoViewObservation(0, 0), "三视图轨迹 isTwoViewObservation == false");
+        check(graph.isTwoViewObservation(0, 1), "两视图轨迹 isTwoViewObservation == true");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[6] ObservationManager：可见性统计 / 轨迹合并\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        std::vector<FeatureResult> fs(3);
+        for (int i = 0; i < 3; ++i) {
+            fs[i].imageId = i;
+            fs[i].imageWidth = kWidth;
+            fs[i].imageHeight = kHeight;
+            for (int k = 0; k < 5; ++k) {
+                fs[i].keypoints.emplace_back(cv::Point2d(100.0 * k, 50.0 * i), 1.0f);
+            }
+        }
+
+        ObservationManager obs(fs, graph);
+
+        const int p0 = obs.addPoint3D(cv::Point3d(0, 0, 10), {{0, 0}, {1, 0}}, cv::Vec3b(1, 2, 3));
+        check(p0 == 0, "addPoint3D 返回 id 0");
+        check(obs.pointIdAt(0, 0) == p0 && obs.pointIdAt(1, 0) == p0,
+              "kpTo3D 双向建立");
+        check(obs.pointIdAt(2, 0) == -1, "未三角化的关键点返回 -1");
+
+        // 图像 2 的 kpt0 与已三角化观测同属一条轨迹 → 可见
+        check(obs.numVisiblePoints3D(2) == 1,
+              QString("图像2 可见三维点 == 1 (实际 %1)").arg(obs.numVisiblePoints3D(2)));
+        check(obs.numVisiblePoints3D(1) == 1, "图像1 可见三维点 == 1");
+
+        std::vector<int> kptIdx, ptId;
+        obs.collect2D3DCorrespondences(2, kptIdx, ptId);
+        check(kptIdx.size() == 1 && ptId.size() == 1 && ptId[0] == p0,
+              QString("图像2 收集到 1 条 2D-3D 对应 (实际 %1)").arg(kptIdx.size()));
+
+        // 合并两条独立轨迹
+        const int p1 = obs.addPoint3D(cv::Point3d(1, 0, 10), {{1, 3}, {2, 3}}, cv::Vec3b(4, 5, 6));
+        const size_t aliveBefore = obs.numAlivePoints();
+        const int merged = obs.mergePoints3D(p0, p1);
+        check(merged == p0, "mergePoints3D 返回保留的点 id");
+        check(obs.numAlivePoints() == aliveBefore - 1, "合并后存活点数减 1");
+        check(obs.point(merged).observations.size() == 4,
+              QString("合并后轨迹长度 == 4 (实际 %1)")
+                  .arg(obs.point(merged).observations.size()));
+        check(obs.pointIdAt(2, 3) == merged, "被并入的关键点重定向到合并后的点");
+        check(!obs.exists(p1), "被合并的点已删除");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[7] IncrementalTriangulator：新建点 + 轨迹补全\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        std::vector<CameraPose> poses(static_cast<size_t>(numCams));
+        std::vector<FeatureResult> fs(static_cast<size_t>(numCams));
+        for (int i = 0; i < numCams; ++i) {
+            poses[i].imageId = i;
+            poses[i].imageWidth = kWidth;
+            poses[i].imageHeight = kHeight;
+            poses[i].K = K.clone();
+            poses[i].R = Rs[static_cast<size_t>(i)].clone();
+            poses[i].t = ts[static_cast<size_t>(i)].clone();
+            poses[i].registered = false;
+
+            fs[i].imageId = i;
+            fs[i].imageWidth = kWidth;
+            fs[i].imageHeight = kHeight;
+            for (int k = 0; k < numPts; ++k) {
+                fs[i].keypoints.emplace_back(project(worldPts[static_cast<size_t>(k)],
+                                                    Rs[static_cast<size_t>(i)],
+                                                    ts[static_cast<size_t>(i)], K), 1.0f);
+            }
+        }
+
+        ObservationManager obs(fs, graph4);
+        IncrementalTriangulator tri(graph4, obs, fs, poses, K);
+
+        // 只注册前两台 → 三角化应产出接近 numPts 个点
+        poses[0].registered = true;
+        poses[1].registered = true;
+        const size_t n0 = tri.triangulateImage(TriangulatorOptions(), 0);
+        const size_t n1 = tri.triangulateImage(TriangulatorOptions(), 1);
+        check(obs.numAlivePoints() > static_cast<size_t>(numPts) * 0.8,
+              QString("两台相机三角化出 %1 个点（期望接近 %2）")
+                  .arg(obs.numAlivePoints()).arg(numPts));
+        check(n0 + n1 >= static_cast<size_t>(numPts),
+              QString("新增/续接观测 %1 条（≥%2）").arg(n0 + n1).arg(numPts));
+
+        // 注册第三台 → CompleteTracks 应把已有轨迹扩展到第三张图
+        poses[2].registered = true;
+        std::vector<int> ids;
+        ids.reserve(obs.allPoints().size());
+        for (size_t i = 0; i < obs.allPoints().size(); ++i) {
+            if (obs.aliveMask()[i]) ids.push_back(static_cast<int>(i));
+        }
+        const size_t completed = tri.completeTracks(TriangulatorOptions(), ids);
+
+        size_t maxTrackLen = 0;
+        for (const int pid : ids) {
+            if (!obs.exists(pid)) continue;
+            maxTrackLen = std::max(maxTrackLen, obs.point(pid).observations.size());
+        }
+        check(completed > 0, QString("补全观测 %1 条").arg(completed));
+        check(maxTrackLen >= 3,
+              QString("轨迹被扩展到 ≥3 张图像 (实际最长 %1)").arg(maxTrackLen));
+
+        // 重三角化：所有图像对三角化率已接近 1，不应重复造点
+        const size_t aliveBefore = obs.numAlivePoints();
+        tri.retriangulate(TriangulatorOptions(), matchPairs);
+        check(obs.numAlivePoints() == aliveBefore,
+              "重三角化不会给已充分重建的图像对重复造点");
     }
 
     std::printf("\n========== 结果: 通过 %d, 失败 %d ==========\n", g_passed, g_failed);
