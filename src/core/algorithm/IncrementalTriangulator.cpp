@@ -266,11 +266,17 @@ size_t IncrementalTriangulator::create(const TriangulatorOptions &options,
         if (c.pointId < 0) candidates.push_back(c);
     }
 
-    if (candidates.size() < static_cast<size_t>(options.minTrackLength)) return 0;
+    ++m_stats.attempts;
+
+    if (candidates.size() < static_cast<size_t>(options.minTrackLength)) {
+        ++m_stats.tooShort;
+        return 0;
+    }
 
     // 两视图轨迹缺乏冗余约束，误匹配无法被残差剔除（COLMAP ignore_two_view_tracks）
     if (options.ignoreTwoViewTracks && candidates.size() == 2 &&
         m_graph->isTwoViewObservation(candidates[0].imageId, candidates[0].kptIdx)) {
+        ++m_stats.twoView;
         return 0;
     }
 
@@ -281,6 +287,14 @@ size_t IncrementalTriangulator::create(const TriangulatorOptions &options,
                                options.createMaxAngleErrorDeg,
                                /*errorIsPixel=*/false,
                                xyz, inlierMask)) {
+        // 区分「三角化角不足」与「角度残差过大」：先用 0° 角阈值重试一次
+        std::vector<char> mask2;
+        if (estimateTriangulation(candidates, 0.0, options.createMaxAngleErrorDeg,
+                                  /*errorIsPixel=*/false, xyz, mask2)) {
+            ++m_stats.angleSmall;
+        } else {
+            ++m_stats.angleError;
+        }
         return 0;
     }
 
@@ -298,6 +312,7 @@ size_t IncrementalTriangulator::create(const TriangulatorOptions &options,
 
     const int pointId = m_obs->addPoint3D(xyz, track, sampleColor(track[0].first, track[0].second));
     m_modified.insert(pointId);
+    ++m_stats.accepted;
 
     // 递归：剩余观测足够多时再尝试建一个点（COLMAP kMinRecursiveTrackLength = 3）
     const size_t numTris = track.size();

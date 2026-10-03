@@ -107,6 +107,23 @@ public:
 
     /// 本轮被新建/修改的点（供局部BA挑选可变点、供过滤使用）
     const std::set<int> &modifiedPoints() const { return m_modified; }
+
+    /**
+     * @brief 建点失败原因统计
+     *
+     * 用于诊断「种子对只三角化出极少数点」这类问题：区分是两视图轨迹被拒、
+     * 三角化角不足，还是角度残差过大。每次 create() 调用累加，clearStats() 清零。
+     */
+    struct Stats {
+        size_t attempts    = 0;  ///< 进入 create() 的候选轨迹数
+        size_t twoView     = 0;  ///< 因「只横跨两张图像」被拒
+        size_t tooShort    = 0;  ///< 观测数不足 minTrackLength
+        size_t angleSmall  = 0;  ///< 三角化角小于 minAngleDeg
+        size_t angleError  = 0;  ///< 迭代重加权后内点数不足 / 残差过大
+        size_t accepted    = 0;  ///< 成功建点
+    };
+    const Stats &stats() const { return m_stats; }
+    void clearStats() { m_stats = Stats(); }
     void clearModified() { m_modified.clear(); }
     void addModifiedPoint(int pointId) { m_modified.insert(pointId); }
 
@@ -163,6 +180,7 @@ private:
     const cv::Mat *m_K = nullptr;
 
     std::set<int> m_modified;                    ///< 本轮新建/修改的点
+    Stats m_stats;                               ///< 建点失败原因统计（诊断用）
     std::set<std::pair<int, int>> m_mergeTrials; ///< 已尝试过的轨迹合并组合（防重复）
     std::map<std::pair<int, int>, int> m_reTrials; ///< 图像对 → 重三角化次数
 };

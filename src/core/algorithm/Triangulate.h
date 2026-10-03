@@ -71,7 +71,16 @@ struct TriangulateOptions
     double initialFilterMaxReprojErrorPx = 12.0;
 
     // ── 初始化三角化 ──────────────────────────────────────────────
-    double initMinTriAngleDeg = 16.0; ///< 种子对三角化角下限（COLMAP init_min_tri_angle）
+    /**
+     * @brief 种子对三角化角下限（COLMAP init_min_tri_angle = 16°）
+     *
+     * COLMAP 的 16° 依赖「种子对足够宽基线」这一隐含前提。视角变化平缓的
+     * 无人机序列达不到该角度，若死守 16° 会导致种子对一个点都建不出来。
+     * 实际执行时按 16° → 8° → 4° → 2° → minTriAngleDeg 阶梯放宽，
+     * 直到三角化出 ≥ minSeedPoints3D 个点。
+     */
+    double initMinTriAngleDeg = 16.0;
+    int minSeedPoints3D = 100;  ///< 种子对至少应三角化出的点数，不足则继续放宽门槛
 
     // ── 阶段二开关 ────────────────────────────────────────────────
     bool enableTrackCompletion  = true; ///< 是否执行 Complete / Merge

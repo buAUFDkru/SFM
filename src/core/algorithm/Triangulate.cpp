@@ -823,29 +823,54 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
     m_registeredCameras.insert(seedId1);
     m_registeredCameras.insert(seedId2);
 
-    // ── 种子对三角化（COLMAP 用 init_min_tri_angle = 16°）─────────────────
+    // ── 种子对三角化：三角化角门槛渐进放宽 ─────────────────────────────────
+    //
+    // COLMAP 用 init_min_tri_angle = 16°，但它有一个隐含前提：种子对必须足够
+    // 宽基线（COLMAP 的初始对选择会显式偏好这一点）。视角变化平缓的无人机序列
+    // 相邻视角往往只有 10~15°，此时 16° 门槛会把几乎所有点拒掉
+    // （实测：9602 个候选中 8118 个因角度不足被拒，最终只建出 0 个点）。
+    //
+    // 因此改为阶梯放宽：先用严格阈值保证精度，点数不够时逐步降低角度门槛；
+    // 最后一步同时放宽「忽略两视图轨迹」限制。每轮只补充上一轮被拒的观测，
+    // 不会重复建点。
     {
         TriangulatorOptions initOpts = m_triOptions;
-        initOpts.minAngleDeg = m_options.initMinTriAngleDeg;
+        size_t numTris = 0;
 
-        size_t numTris = m_triangulator->triangulateImage(initOpts, seedId1);
-        numTris += m_triangulator->triangulateImage(initOpts, seedId2);
+        const double angleLadder[] = {m_options.initMinTriAngleDeg, 8.0, 4.0, 2.0,
+                                      m_options.minTriAngleDeg};
+        const size_t minSeedPts = static_cast<size_t>(
+            std::max(m_options.minSeedPoints3D, m_options.absPoseMinNumInliers * 3));
 
-        // 两视图轨迹被 ignore_two_view_tracks 全部挡掉时的兜底
-        if (m_obs->numAlivePoints() == 0 && m_options.allowTwoViewTracksFallback) {
+        for (int step = 0; step < 5; ++step) {
+            if (m_obs->numAlivePoints() >= minSeedPts) break;
+
+            initOpts.minAngleDeg = angleLadder[step];
+            // 最后一步放宽两视图轨迹限制（COLMAP 默认忽略，但种子对阶段
+            // 已注册图像只有 2 张，仅靠多视图轨迹往往凑不出足够多的点）
+            if (step == 4) initOpts.ignoreTwoViewTracks = false;
+
+            const size_t before = m_obs->numAlivePoints();
+            const size_t n1 = m_triangulator->triangulateImage(initOpts, seedId1);
+            const size_t n2 = m_triangulator->triangulateImage(initOpts, seedId2);
+            numTris += n1 + n2;
+
+            const auto &st = m_triangulator->stats();
             qDebug().noquote()
-                << "[三角测量] 种子对按 COLMAP 默认（忽略两视图轨迹）无点，放宽后重试";
-            initOpts.ignoreTwoViewTracks = false;
-            numTris = m_triangulator->triangulateImage(initOpts, seedId1);
-            numTris += m_triangulator->triangulateImage(initOpts, seedId2);
+                << QString("[三角测量] 种子对 #%1↔#%2 第%3轮: 角门槛=%4° 两视图限制=%5 → "
+                           "新增观测=%6, 三维点 %7→%8 | 拒: 两视图=%9 角度过小=%10 残差=%11")
+                       .arg(seedId1).arg(seedId2).arg(step + 1)
+                       .arg(angleLadder[step], 0, 'f', 1)
+                       .arg(initOpts.ignoreTwoViewTracks ? "开" : "关")
+                       .arg(static_cast<qlonglong>(n1 + n2))
+                       .arg(static_cast<qlonglong>(before))
+                       .arg(static_cast<qlonglong>(m_obs->numAlivePoints()))
+                       .arg(static_cast<qlonglong>(st.twoView))
+                       .arg(static_cast<qlonglong>(st.angleSmall))
+                       .arg(static_cast<qlonglong>(st.angleError));
+            m_triangulator->clearStats();
         }
         m_triangulator->clearModified();
-
-        qDebug().noquote()
-            << QString("[三角测量] 种子对 #%1↔#%2 三角化观测=%3, 三维点=%4")
-                   .arg(seedId1).arg(seedId2)
-                   .arg(static_cast<qlonglong>(numTris))
-                   .arg(static_cast<qlonglong>(m_obs->numAlivePoints()));
     }
 
     if (m_obs->numAlivePoints() == 0) {

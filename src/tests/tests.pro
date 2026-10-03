@@ -5,4 +5,5 @@ SUBDIRS = \
     plugin_test \
     patchmatch_test \
     sparse_test \
-    ui_test
+    ui_test \
+    recon_cli
