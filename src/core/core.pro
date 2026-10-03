@@ -37,6 +37,7 @@ HEADERS += \
     pipeline/DenseReconstructionFactory.h \
     pipeline/StereoSGBMReconstructor.h \
     pipeline/PatchMatchReconstructor.h \
+    pipeline/PatchMatchReconstructorV2.h \
     pipeline/ReconstructionPipeline.h \
     pipeline/ReconstructionWorker.h \
     pipeline/PipelineRunner.h \
@@ -58,6 +59,7 @@ SOURCES += \
     pipeline/DenseReconstructionFactory.cpp \
     pipeline/StereoSGBMReconstructor.cpp \
     pipeline/PatchMatchReconstructor.cpp \
+    pipeline/PatchMatchReconstructorV2.cpp \
     pipeline/ReconstructionPipeline.cpp \
     pipeline/ReconstructionWorker.cpp \
     pipeline/PipelineRunner.cpp \

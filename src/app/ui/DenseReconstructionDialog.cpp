@@ -23,6 +23,40 @@ namespace {
 QList<ParamSchema> schemasForMethod(const QString &method)
 {
     QList<ParamSchema> out;
+    auto addInt = [&out](const QString &name, int def, int mn, int mx,
+                         const QString &group, const QString &tip) {
+        ParamSchema s;
+        s.name = name;
+        s.type = ParamSchema::Type::Int;
+        s.defaultValue = def;
+        s.min = mn;
+        s.max = mx;
+        s.group = group;
+        s.tooltip = tip;
+        out.append(s);
+    };
+    auto addDouble = [&out](const QString &name, double def, double mn, double mx,
+                            const QString &group, const QString &tip) {
+        ParamSchema s;
+        s.name = name;
+        s.type = ParamSchema::Type::Double;
+        s.defaultValue = def;
+        s.min = mn;
+        s.max = mx;
+        s.group = group;
+        s.tooltip = tip;
+        out.append(s);
+    };
+    auto addBool = [&out](const QString &name, bool def,
+                          const QString &group, const QString &tip) {
+        ParamSchema s;
+        s.name = name;
+        s.type = ParamSchema::Type::Bool;
+        s.defaultValue = def;
+        s.group = group;
+        s.tooltip = tip;
+        out.append(s);
+    };
     if (method == QStringLiteral("StereoSGBM")) {
         ParamSchema maxDepth;
         maxDepth.name = QStringLiteral("maxDepth");
@@ -80,41 +114,6 @@ QList<ParamSchema> schemasForMethod(const QString &method)
         out.append(useWls);
     } else if (method == QStringLiteral("PatchMatch")) {
         // 与 PatchMatchReconstructor::Options 的常用字段对齐
-        auto addInt = [&out](const QString &name, int def, int mn, int mx,
-                             const QString &group, const QString &tip) {
-            ParamSchema s;
-            s.name = name;
-            s.type = ParamSchema::Type::Int;
-            s.defaultValue = def;
-            s.min = mn;
-            s.max = mx;
-            s.group = group;
-            s.tooltip = tip;
-            out.append(s);
-        };
-        auto addDouble = [&out](const QString &name, double def, double mn, double mx,
-                                const QString &group, const QString &tip) {
-            ParamSchema s;
-            s.name = name;
-            s.type = ParamSchema::Type::Double;
-            s.defaultValue = def;
-            s.min = mn;
-            s.max = mx;
-            s.group = group;
-            s.tooltip = tip;
-            out.append(s);
-        };
-        auto addBool = [&out](const QString &name, bool def,
-                              const QString &group, const QString &tip) {
-            ParamSchema s;
-            s.name = name;
-            s.type = ParamSchema::Type::Bool;
-            s.defaultValue = def;
-            s.group = group;
-            s.tooltip = tip;
-            out.append(s);
-        };
-
         addDouble(QStringLiteral("depthMin"), -1.0, -1.0, 1e6,
                   QStringLiteral("深度"), QObject::tr("最小深度；<0 从稀疏点自动估计"));
         addDouble(QStringLiteral("depthMax"), -1.0, -1.0, 1e6,
@@ -141,6 +140,44 @@ QList<ParamSchema> schemasForMethod(const QString &method)
                 QStringLiteral("过滤"), QObject::tr("启用置信度过滤"));
         addBool(QStringLiteral("geomConsistency"), false,
                 QStringLiteral("过滤"), QObject::tr("几何一致性校验（当前保留未实现）"));
+    } else if (method == QStringLiteral("PatchMatchV2")) {
+        // 与 PatchMatchReconstructorV2::Options（优化版）的常用字段对齐，
+        // 默认值即 2026-10-03 全量验证录定配置（多尺度+几何一致性+topk4
+        // +融合+全分辨率 1320+平面先验）
+        addDouble(QStringLiteral("depthMin"), -1.0, -1.0, 1e6,
+                  QStringLiteral("深度"), QObject::tr("最小深度；<0 从稀疏点自动估计"));
+        addDouble(QStringLiteral("depthMax"), -1.0, -1.0, 1e6,
+                  QStringLiteral("深度"), QObject::tr("最大深度；<0 从稀疏点自动估计"));
+        addInt(QStringLiteral("maxImageSize"), 1320, 0, 8000,
+               QStringLiteral("性能"), QObject::tr("工作图像最大边长；0 = 不缩放（全分辨率）"));
+        addInt(QStringLiteral("windowRadius"), 5, 1, 20,
+               QStringLiteral("性能"), QObject::tr("NCC 匹配窗口半径（半宽）"));
+        addInt(QStringLiteral("numSamples"), 15, 1, 100,
+               QStringLiteral("性能"), QObject::tr("每像素随机采样数（初始化）"));
+        addInt(QStringLiteral("numIterations"), 5, 1, 50,
+               QStringLiteral("性能"), QObject::tr("邻域传播迭代轮数（多尺度时为最粗层轮数）"));
+        addBool(QStringLiteral("multiscale"), true,
+                QStringLiteral("性能"), QObject::tr("多尺度金字塔 + JBU 上采样（提速并支撑高分辨率）"));
+        addBool(QStringLiteral("planePrior"), true,
+                QStringLiteral("性能"), QObject::tr("平面先验（ACMP 受限后验：弱纹理区域更完整、重投影误差更低，耗时约 +12%）"));
+        addInt(QStringLiteral("costTopK"), 4, 1, 10,
+               QStringLiteral("代价"), QObject::tr("多视图代价聚合：取最优 k 个源视图代价平均（抗遮挡/高光）"));
+        addDouble(QStringLiteral("nccSigma"), 0.6, 0.1, 5.0,
+                  QStringLiteral("代价"), QObject::tr("NCC 似然函数扩散系数"));
+        addDouble(QStringLiteral("sigmaColor"), 51.0, 1.0, 255.0,
+                  QStringLiteral("代价"), QObject::tr("颜色权重 sigma（uint8 图像）"));
+        addDouble(QStringLiteral("minTriangulationAngle"), 0.5, 0.1, 10.0,
+                  QStringLiteral("代价"), QObject::tr("选源图像最小光轴夹角（度）"));
+        addDouble(QStringLiteral("filterMinNcc"), 0.1, 0.0, 1.0,
+                  QStringLiteral("过滤"), QObject::tr("过滤最小 NCC 阈值（代价上限）"));
+        addDouble(QStringLiteral("filterMinTriangulationAngle"), 3.0, 0.0, 30.0,
+                  QStringLiteral("过滤"), QObject::tr("过滤最小三角化角度（度）"));
+        addBool(QStringLiteral("filter"), true,
+                QStringLiteral("过滤"), QObject::tr("启用置信度过滤"));
+        addBool(QStringLiteral("geomConsistency"), true,
+                QStringLiteral("过滤"), QObject::tr("几何一致性过滤（往返重投影剔除离群点）"));
+        addBool(QStringLiteral("fusion"), true,
+                QStringLiteral("过滤"), QObject::tr("深度融合：跨视图去重 + 置信度加权平均（降离群点、点云更紧致）"));
     }
     // 其余方法暂无可配置参数
     return out;

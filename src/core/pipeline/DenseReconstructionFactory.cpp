@@ -1,6 +1,7 @@
 #include "DenseReconstructionFactory.h"
 
 #include "PatchMatchReconstructor.h"
+#include "PatchMatchReconstructorV2.h"
 #include "StereoSGBMReconstructor.h"
 
 DenseReconstructionFactory &DenseReconstructionFactory::instance()
@@ -60,5 +61,9 @@ void DenseReconstructionFactory::registerBuiltinMethods()
     registerMethod("PatchMatch", "PatchMatch 多视图匹配",
                    []() -> IDenseReconstructorPtr {
                        return std::make_unique<PatchMatchReconstructor>();
+                   });
+    registerMethod("PatchMatchV2", "PatchMatch 优化版（多尺度+平面先验）",
+                   []() -> IDenseReconstructorPtr {
+                       return std::make_unique<PatchMatchReconstructorV2>();
                    });
 }
