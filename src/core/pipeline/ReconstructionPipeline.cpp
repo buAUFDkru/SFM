@@ -252,6 +252,12 @@ ReconstructionOutput ReconstructionPipeline::execute()
     // =====================================================================
     // Stage 2/6: 特征匹配（MatcherService 编排）
     // =====================================================================
+    // 内参优先在匹配前确定：阶段三的两视图几何在已知 K 时会直接估本质矩阵 E，
+    // 精度优于「先估 F 再算 E = KᵀFK」，且能顺带判定 PLANAR / PANORAMIC 退化。
+    cv::Mat K = m_config.cameraMatrix.empty()
+                ? Triangulate::instance()->estimateK(m_features)
+                : m_config.cameraMatrix.clone();
+
     log("-------- [阶段 2/6] 特征匹配 开始 --------");
     setProgress("特征匹配", 0);
     stageTimer.restart();
@@ -260,7 +266,7 @@ ReconstructionOutput ReconstructionPipeline::execute()
     std::vector<MatchPair> matchPairs;
     if (!matcherService.matchFeatures(
             m_features, m_config.matcherType, m_config.matcherParams, matchPairs,
-            &threadPool, [this](const QString &msg) { log(msg); })) {
+            &threadPool, [this](const QString &msg) { log(msg); }, K)) {
         log("错误: 特征匹配失败");
         return output;
     }
@@ -273,9 +279,6 @@ ReconstructionOutput ReconstructionPipeline::execute()
         .arg(stageTimer.elapsed() / 1000.0, 0, 'f', 1));
     log("-------- [阶段 2/6] 特征匹配 完成 --------");
 
-    cv::Mat K = m_config.cameraMatrix.empty()
-                ? Triangulate::instance()->estimateK(m_features)
-                : m_config.cameraMatrix.clone();
     if (!m_config.cameraMatrix.empty()) {
         log(QString("[内参矩阵] 使用外部提供的K: fx=%1 fy=%2 cx=%3 cy=%4")
             .arg(K.at<double>(0, 0), 0, 'f', 2)

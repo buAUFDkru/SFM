@@ -42,10 +42,18 @@ struct ReconstructionConfig
     QString matcherType = "FLANN";              ///< 匹配器插件 id
     QJsonObject matcherParams{
         {"ratioThreshold", 0.8},
-        {"ransacThreshold", 3.0},
+        // 不写 ransacThreshold：交由 MatcherService 按图像分辨率自适应
+        // （长边 4000 → 4px，1000 → 1px）。需要手工干预时再显式指定该键。
         // 建边阈值放宽：大视角数据集单对内点数天然偏少，原先 50 / 0.05 过严
         {"minMatchCount", 30},
         {"minMatchRatio", 0.02},
+        // 阶段三：已知 K 直接估 E + 引导匹配 + 建边阈值自适应阶梯
+        {"minNumInliers", 15},
+        {"guidedMatching", true},
+        {"guidedKnn", 5},
+        {"guidedRatio", 0.9},
+        {"guidedBelowInliers", 500},
+        {"adaptiveEdgeThreshold", true},
         // 匹配模式：auto 表示小规模数据集（≤ exhaustiveMaxImages）自动走穷举，
         // 避免序列窗口漏掉真实重叠对
         {"matchingMode", "auto"},

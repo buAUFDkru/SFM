@@ -30,6 +30,7 @@
 #include <QVector>
 #include <QDebug>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iterator>
 #include <map>
@@ -371,6 +372,7 @@ std::vector<std::pair<int, int>> Triangulate::findNextImages() const
 
 bool Triangulate::registerNextImage(int imageId)
 {
+    const std::chrono::steady_clock::time_point regT0 = std::chrono::steady_clock::now();
     std::vector<int> kptIdx, pointId;
     m_obs->collect2D3DCorrespondences(imageId, kptIdx, pointId);
 
@@ -410,11 +412,15 @@ bool Triangulate::registerNextImage(int imageId)
     m_registeredCameras.insert(imageId);
     m_numRegTrials[static_cast<size_t>(imageId)] = 0;
 
+    const double regMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - regT0).count();
+
     qDebug().noquote()
-        << QString("[注册] 图像 #%1 注册成功（2D-3D=%2, 内点=%3），已注册 %4 台")
+        << QString("[注册] 图像 #%1 注册成功（2D-3D=%2, 内点=%3），已注册 %4 台，%5 ms")
                .arg(imageId).arg(pts2d.size())
                .arg(std::count(inlierMask.begin(), inlierMask.end(), 1))
-               .arg(m_registeredCameras.size());
+               .arg(m_registeredCameras.size())
+               .arg(static_cast<qlonglong>(regMs));
 
     return true;
 }

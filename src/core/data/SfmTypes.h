@@ -61,6 +61,22 @@ inline cv::Point2d pixel2cam(const cv::Point2d &p, const cv::Mat &K)
 using ImageSequence = std::vector<ImageEntry>;
 
 /**
+ * @brief 两视图几何配置（对齐 COLMAP TwoViewGeometry::Configuration）
+ *
+ * 由 `TwoViewGeometry` 估计产出，记录该图像对所属的场景类型。
+ * 下游（初始化选种子对、建边决策）据此判断这对匹配能用到什么程度。
+ */
+enum TwoViewConfig
+{
+    TWO_VIEW_UNDEFINED    = 0,  ///< 未估计
+    TWO_VIEW_DEGENERATE   = 1,  ///< 内点不足 / 模型估计失败 → 该对应丢弃
+    TWO_VIEW_CALIBRATED   = 2,  ///< 内参已知，本质矩阵 E 有效 → 可恢复相对位姿
+    TWO_VIEW_UNCALIBRATED = 3,  ///< 内参未知，仅基础矩阵 F 有效
+    TWO_VIEW_PLANAR       = 4,  ///< 单应主导（近似平面场景）→ 不宜作种子对
+    TWO_VIEW_PANORAMIC    = 5   ///< 近似纯旋转 → 平移不可恢复，不宜作种子对
+};
+
+/**
  * @brief 图像对匹配结果（算法层）
  *
  * 存储一对图像之间的特征匹配结果，包括匹配点坐标和统计信息。
@@ -75,9 +91,11 @@ struct MatchPair
     std::vector<cv::Point2d> points2;      ///< 图像B匹配点的像素坐标
     int matchCount = 0;                     ///< 有效匹配数量
     double avgDistance = 0.0;              ///< 平均描述符距离（衡量匹配质量）
-    int modelChoice = 0;                    ///< GRIC模型选择：0=F（基础矩阵），1=H（单应矩阵）
-    cv::Mat F;                              ///< 基础矩阵（3×3）
-    cv::Mat H;                              ///< 单应矩阵（3×3）
+    int modelChoice = 0;                    ///< 选中模型：0=F/E（对极），1=H（单应）
+    cv::Mat F;                              ///< 基础矩阵（3×3，像素坐标）
+    cv::Mat H;                              ///< 单应矩阵（3×3，像素坐标）
+    cv::Mat E;                              ///< 本质矩阵（3×3，**归一化坐标**：x₂ₙᵀ·E·x₁ₙ=0）
+    int geometryConfig = TWO_VIEW_UNDEFINED;///< 两视图几何配置（TwoViewConfig）
 };
 
 /**

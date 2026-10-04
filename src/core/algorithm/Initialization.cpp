@@ -10,6 +10,7 @@
  */
 
 #include "Initialization.h"
+#include "TwoViewGeometry.h"
 
 #include <QDebug>
 #include <QtMath>
@@ -464,18 +465,29 @@ std::vector<InitResult> Initialization::findInitialPairCandidates(
             pts2.push_back(kpts2[m.trainIdx].pt);
         }
 
+        // 近似纯旋转的对恢复不出平移，直接不作为种子候选
+        if (mp.geometryConfig == TWO_VIEW_PANORAMIC) continue;
+
         // ── 2D-2D 相对定向 + 位姿恢复 ──
-        // 根据 MatcherFactory 中 GRIC 选择的模型恢复位姿
         cv::Mat R, t;
         int modelChoice = -1;
         bool poseOk = false;
 
-        if (mp.modelChoice == 0) {
+        // 已知内参且本质矩阵有效时优先用 E：省掉 E = KᵀFK 的两次矩阵变换，
+        // 位姿精度更好（对应 COLMAP 的 EstimateCalibratedTwoViewGeometry）
+        if (mp.geometryConfig == TWO_VIEW_CALIBRATED && !mp.E.empty()) {
+            std::vector<uchar> inlierMaskE;
+            poseOk = recoverPoseFromE(mp.E, pts1, pts2, K, R, t, inlierMaskE) >= 8;
+            modelChoice = 0;
+        }
+
+        if (!poseOk && mp.modelChoice == 0) {
             // F模型：通过本质矩阵E分解
             std::vector<uchar> inlierMask;
             poseOk = recoverPoseFromF(pts1, pts2, K, mp.F, R, t, inlierMask);
             modelChoice = 0;
-        } else {
+        }
+        if (!poseOk) {
             // H模型：通过单应矩阵分解
             poseOk = recoverPoseFromH(pts1, pts2, K, mp.H, R, t);
             modelChoice = 1;

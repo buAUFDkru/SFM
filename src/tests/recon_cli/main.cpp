@@ -135,11 +135,22 @@ int main(int argc, char *argv[])
                 timer.elapsed() / 1000.0);
 
     // ── 2) 特征匹配 ────────────────────────────────────────────────────────
+    //    内参先算出来：已知 K 时两视图几何直接估本质矩阵 E
+    const cv::Mat K = Triangulate::instance()->estimateK(features);
+    std::printf("[内参估计] fx=%.1f fy=%.1f cx=%.1f cy=%.1f\n",
+                K.at<double>(0, 0), K.at<double>(1, 1),
+                K.at<double>(0, 2), K.at<double>(1, 2));
+
     timer.restart();
     QJsonObject matcherParams{{"ratioThreshold", 0.8},
-                              {"ransacThreshold", 3.0},
                               {"minMatchCount", 30},
                               {"minMatchRatio", 0.02},
+                              {"minNumInliers", 15},
+                              {"guidedMatching", true},
+                              {"guidedKnn", 5},
+                              {"guidedRatio", 0.9},
+                              {"guidedBelowInliers", 500},
+                              {"adaptiveEdgeThreshold", true},
                               {"matchingMode", matchingMode},
                               {"sequenceWindow", 10},
                               {"exhaustiveMaxImages", 50}};
@@ -167,7 +178,8 @@ int main(int argc, char *argv[])
                                       &threadPool,
                                       [](const QString &msg) {
                                           std::printf("  %s\n", qPrintable(msg));
-                                      })) {
+                                      },
+                                      K)) {
         std::printf("错误: 特征匹配失败\n");
         return 2;
     }
@@ -178,13 +190,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // ── 3) 内参 ────────────────────────────────────────────────────────────
-    const cv::Mat K = Triangulate::instance()->estimateK(features);
-    std::printf("[内参估计] fx=%.1f fy=%.1f cx=%.1f cy=%.1f\n",
-                K.at<double>(0, 0), K.at<double>(1, 1),
-                K.at<double>(0, 2), K.at<double>(1, 2));
-
-    // ── 4) 初始化候选 ──────────────────────────────────────────────────────
+    // ── 3) 初始化候选 ──────────────────────────────────────────────────────
     const std::vector<InitResult> initCandidates =
         Initialization::instance()->findInitialPairCandidates(features, matchPairs, K, 3);
     if (initCandidates.empty()) {

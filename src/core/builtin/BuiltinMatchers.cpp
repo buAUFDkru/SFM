@@ -2,6 +2,10 @@
 
 #include <QDebug>
 
+#include <memory>
+#include <mutex>
+#include <vector>
+
 #include <opencv2/core/hal/intrin.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/flann.hpp>
@@ -22,6 +26,117 @@ cv::Ptr<cv::FlannBasedMatcher> makeFlannMatcher(int trees, int descType)
         cv::makePtr<cv::flann::KDTreeIndexParams>(trees));
 }
 
+// ── 训练集索引缓存 ────────────────────────────────────────────────────────────
+//
+// 穷举模式下同一张图的描述符会作为训练集出现 (N-1) 次，而
+// cv::FlannBasedMatcher 每次 knnMatch 都重建索引——8000×128 的 SIFT 建一棵
+// 4 树 KD 索引要几百毫秒，占单对匹配耗时的大头。这里按「训练描述符数据指针」
+// 缓存已建好的 GenericIndex，命中后只做 knnSearch。
+//
+// 键的安全性：特征在整个重建流程中常驻内存（features 向量），
+// cv::Mat 数据指针稳定；条目同时持有一个浅引用防止悬垂。
+// FLANN 的 knnSearch 是只读操作，多线程并发搜索同一索引是安全的。
+
+constexpr size_t kFlannCacheCapacity = 64;
+
+struct FlannIndexEntry
+{
+    const uchar *key = nullptr;
+    int rows = 0, cols = 0, type = 0;
+    cv::Mat trainRef; // 浅引用，保证数据在索引存续期内有效
+    cv::Ptr<cv::flann::Index> index;
+};
+
+struct FlannIndexCache
+{
+    std::mutex mtx;
+    std::vector<FlannIndexEntry> entries; // 队尾为最近使用
+
+    static FlannIndexCache &instance()
+    {
+        static FlannIndexCache c;
+        return c;
+    }
+
+    /// 命中返回索引并把条目移到队尾；未命中返回 nullptr
+    cv::flann::Index *acquire(const cv::Mat &train)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (size_t i = entries.size(); i-- > 0;) {
+            auto &e = entries[i];
+            if (e.key == train.data && e.rows == train.rows &&
+                e.cols == train.cols && e.type == train.type()) {
+                if (i + 1 != entries.size()) {
+                    FlannIndexEntry tmp = std::move(e);
+                    entries.erase(entries.begin() + static_cast<long>(i));
+                    entries.push_back(std::move(tmp));
+                }
+                return entries.back().index.get();
+            }
+        }
+        return nullptr;
+    }
+
+    void store(const cv::Mat &train, int trees)
+    {
+        // 建索引放在锁内：两个线程同时为同一训练集建索引纯属浪费
+        std::lock_guard<std::mutex> lock(mtx);
+        for (const auto &e : entries) {
+            if (e.key == train.data && e.rows == train.rows &&
+                e.cols == train.cols && e.type == train.type()) {
+                return; // 别的线程刚存过
+            }
+        }
+        FlannIndexEntry e;
+        e.key = train.data;
+        e.rows = train.rows;
+        e.cols = train.cols;
+        e.type = train.type();
+        e.trainRef = train; // 浅引用
+        e.index = cv::makePtr<cv::flann::Index>(train, cv::flann::KDTreeIndexParams(trees));
+        if (entries.size() >= kFlannCacheCapacity) {
+            entries.erase(entries.begin()); // 淘汰最久未用
+        }
+        entries.push_back(std::move(e));
+    }
+};
+
+/// 命中缓存则直接 knnSearch；未命中建索引、存缓存后再搜。返回是否处理成功。
+bool flannKnnCached(const cv::Mat &desc1, const cv::Mat &desc2, int k,
+                    int trees, int checks,
+                    std::vector<std::vector<cv::DMatch>> &outKnnMatches)
+{
+    if (desc1.type() != CV_32F || desc2.type() != CV_32F) {
+        return false; // 二进制描述符仍走 LSH 老路
+    }
+
+    auto *index = FlannIndexCache::instance().acquire(desc2);
+    if (!index) {
+        FlannIndexCache::instance().store(desc2, trees);
+        index = FlannIndexCache::instance().acquire(desc2);
+        if (!index) {
+            return false;
+        }
+    }
+
+    // knnSearch 只读，多线程共享同一索引是安全的（OpenCV FLANN 搜索无状态）
+    cv::Mat indices, dists;
+    index->knnSearch(desc1, indices, dists, k, cv::flann::SearchParams(checks));
+
+    outKnnMatches.assign(desc1.rows, {});
+    for (int r = 0; r < indices.rows; ++r) {
+        const int *idxRow = indices.ptr<int>(r);
+        const float *distRow = dists.ptr<float>(r);
+        for (int c = 0; c < k && c < indices.cols; ++c) {
+            if (idxRow[c] < 0 || idxRow[c] >= desc2.rows) {
+                continue; // FLANN 不足 k 个近邻时以 -1 填充
+            }
+            outKnnMatches[r].emplace_back(r, idxRow[c], distRow[c]);
+        }
+    }
+    return !outKnnMatches.empty();
+}
+
 } // namespace
 
 FlannMatcherWorker::FlannMatcherWorker(const QJsonObject &params)
@@ -39,6 +154,11 @@ bool FlannMatcherWorker::knnMatchPair(const cv::Mat &desc1, const cv::Mat &desc2
     outKnnMatches.clear();
     if (desc1.empty() || desc2.empty())
         return false;
+
+    // 浮点描述符优先走「训练集索引缓存」路径（穷举匹配的主要提速点）
+    if (flannKnnCached(desc1, desc2, k, m_trees, m_checks, outKnnMatches)) {
+        return true;
+    }
 
     auto flannMatcher = makeFlannMatcher(m_trees, desc1.type());
     flannMatcher->knnMatch(desc1, desc2, outKnnMatches, k);

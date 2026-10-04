@@ -13,6 +13,7 @@
 #include "ThreadPool.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -33,6 +34,15 @@ namespace sfm {
 thread_pool_options make_cpu_pool_options(std::size_t threads) {
     thread_pool_options options;
     options.name = "cpu_pool";
+    // 环境变量 SFM_POOL_THREADS 可覆盖默认线程数（调试/基准测试用）
+    if (threads == 0) {
+        if (const char *env = std::getenv("SFM_POOL_THREADS")) {
+            const long n = std::strtol(env, nullptr, 10);
+            if (n >= 1) {
+                threads = static_cast<std::size_t>(n);
+            }
+        }
+    }
     if (threads == 0) {
         // 未指定线程数时，默认保留部分核心给 UI/OS，使用逻辑处理器数 / 2。
         // 例如 4 核 8 线程 CPU：hardware_concurrency() == 8，默认线程数为 4。

@@ -14,6 +14,8 @@
 #include "BundleAdjustment.h"
 
 #include <QDebug>
+#include <chrono>
+
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 
@@ -203,18 +205,22 @@ bool BundleAdjustment::localBundleAdjustment(
     options.minimizer_progress_to_stdout = false;
 
     ceres::Solver::Summary summary;
+    const std::chrono::steady_clock::time_point baT0 = std::chrono::steady_clock::now();
     ceres::Solve(options, &problem, &summary);
+    const double baMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - baT0).count();
 
     qDebug().noquote()
         << QString("[BA局部] 可变相机=%1, 可变点=%2, 残差=%3, 收敛=%4, %5次迭代, "
-                   "初始代价=%6, 最终代价=%7")
+                   "初始代价=%6, 最终代价=%7, %8 ms")
                .arg(static_cast<qlonglong>(numVarCameras))
                .arg(static_cast<qlonglong>(numVarPoints))
                .arg(problem.NumResidualBlocks() * 2)
                .arg(summary.termination_type == ceres::CONVERGENCE)
                .arg(summary.iterations.size())
-               .arg(summary.initial_cost, 0, 'e', 3)
-               .arg(summary.final_cost, 0, 'e', 3);
+                .arg(summary.initial_cost, 0, 'e', 3)
+                .arg(summary.final_cost, 0, 'e', 3)
+               .arg(static_cast<qlonglong>(baMs));
     return summary.termination_type == ceres::CONVERGENCE;
 }
 
@@ -285,6 +291,15 @@ bool BundleAdjustment::globalBundleAdjustment(
     } else {
         // 内参可变：使用 SelfCalibReprojectionError，添加 K 参数块
         problem.AddParameterBlock(K, 3);
+        // 弱角度图上无约束自标定是病态问题：主点会滑向非物理值（实测 cy 漂出
+        // 图像外），焦距与主点/场景深度强耦合，诱发 CHOLMOD 非正定。
+        // 处理：主点固定为初值（其误差可被相机旋转吸收，影响小），
+        // 焦距限制在初值 [0.5, 4] 倍内——estimateK 的 60° FOV 假设可能偏离
+        // 真值 2~3 倍，上限太紧会卡死在错误焦距上（实测点数骤降）。
+        std::vector<int> fixedParams = {1, 2}; // cx, cy
+        problem.SetManifold(K, new ceres::SubsetManifold(3, fixedParams));
+        problem.SetParameterLowerBound(K, 0, 0.5 * K[0]);
+        problem.SetParameterUpperBound(K, 0, 4.0 * K[0]);
         for (const auto &obs : observations) {
             int camIdx = std::get<0>(obs);
             int ptIdx  = std::get<1>(obs);
@@ -313,7 +328,10 @@ bool BundleAdjustment::globalBundleAdjustment(
     options.minimizer_progress_to_stdout = false;
 
     ceres::Solver::Summary summary;
+    const std::chrono::steady_clock::time_point gbaT0 = std::chrono::steady_clock::now();
     ceres::Solve(options, &problem, &summary);
+    const double gbaMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - gbaT0).count();
 
     if (!fixIntrinsics) {
         // 回写优化后的内参：fx = fy = f
@@ -329,11 +347,12 @@ bool BundleAdjustment::globalBundleAdjustment(
     }
 
     qDebug().noquote()
-        << QString("[BA全局] 收敛=%1, %2次迭代, 初始代价=%3, 最终代价=%4")
+        << QString("[BA全局] 收敛=%1, %2次迭代, 初始代价=%3, 最终代价=%4, %5 ms")
                .arg(summary.termination_type == ceres::CONVERGENCE)
                .arg(summary.iterations.size())
                .arg(summary.initial_cost, 0, 'e', 3)
-               .arg(summary.final_cost, 0, 'e', 3);
+               .arg(summary.final_cost, 0, 'e', 3)
+               .arg(static_cast<qlonglong>(gbaMs));
 
     return summary.termination_type == ceres::CONVERGENCE;
 }

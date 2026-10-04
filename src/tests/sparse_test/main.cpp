@@ -33,6 +33,7 @@
 #include "algorithm/CorrespondenceGraph.h"
 #include "algorithm/ObservationManager.h"
 #include "algorithm/IncrementalTriangulator.h"
+#include "algorithm/TwoViewGeometry.h"
 #include "data/SfmTypes.h"
 
 namespace {
@@ -420,6 +421,195 @@ int main(int argc, char **argv)
         tri.retriangulate(TriangulatorOptions(), matchPairs);
         check(obs.numAlivePoints() == aliveBefore,
               "重三角化不会给已充分重建的图像对重复造点");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[8] TwoViewGeometry：已知 K 直接估 E + 退化判定\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        // 阈值自适应：长边 4000 → 4px，2000 → 2px，800 → 2px（夹在 [2,4]，
+        // 下限 2px 防止阈值过紧导致内点率崩塌、RANSAC 打满迭代）
+        check(std::abs(adaptiveRansacThresholdPx(4000, 3000) - 4.0) < 1e-9,
+              QString("自适应阈值 4000px → 4.0 (实际 %1)")
+                  .arg(adaptiveRansacThresholdPx(4000, 3000)));
+        check(std::abs(adaptiveRansacThresholdPx(2000, 1500) - 2.0) < 1e-9,
+              QString("自适应阈值 2000px → 2.0 (实际 %1)")
+                  .arg(adaptiveRansacThresholdPx(2000, 1500)));
+        check(std::abs(adaptiveRansacThresholdPx(800, 600) - 2.0) < 1e-9,
+              QString("自适应阈值 800px → 2.0 (实际 %1)")
+                  .arg(adaptiveRansacThresholdPx(800, 600)));
+
+        // ── 两台相机的普通三维场景 ──
+        cv::Mat R0, t0, R1, t1;
+        makePose(cv::Vec3d(5.0, -1.0, 0.5), R0, t0);
+        makePose(cv::Vec3d(5.0, 1.6, 0.9), R1, t1);
+
+        cv::RNG rng(7788);
+        std::vector<cv::Vec3d> pts3d;
+        for (int i = 0; i < 200; ++i) {
+            pts3d.emplace_back(rng.uniform(-1.5, 1.5),
+                               rng.uniform(-1.5, 1.5),
+                               rng.uniform(-1.5, 1.5));
+        }
+
+        std::vector<cv::Point2d> qa, qb;
+        for (const auto &P : pts3d) {
+            const cv::Point2d pa = project(P, R0, t0, K);
+            const cv::Point2d pb = project(P, R1, t1, K);
+            qa.emplace_back(pa.x + rng.gaussian(0.3), pa.y + rng.gaussian(0.3));
+            qb.emplace_back(pb.x + rng.gaussian(0.3), pb.y + rng.gaussian(0.3));
+        }
+
+        TwoViewGeometryOptions gopt;
+        gopt.ransacMaxErrorPx = 2.0;
+        const TwoViewGeometry geom = estimateTwoViewGeometry(qa, qb, K, gopt);
+        check(geom.config == TWO_VIEW_CALIBRATED,
+              QString("普通三维场景判定为 CALIBRATED (实际 %1)").arg(geom.config));
+        check(geom.poseValid(), "CALIBRATED 下 R/t 可用");
+        check(geom.numInliers > 180,
+              QString("内点数 %1 / 200").arg(geom.numInliers));
+
+        // 与真值相对位姿比对
+        const cv::Mat Rrel = R1 * R0.t();
+        const cv::Mat trel = t1 - Rrel * t0;
+        const cv::Mat Rdiff = geom.R * Rrel.t();
+        const double traceR = cv::trace(Rdiff)[0];
+        const double angR = std::acos(std::max(-1.0, std::min(1.0, (traceR - 1.0) * 0.5)))
+                            * 180.0 / CV_PI;
+        check(angR < 2.0, QString("旋转误差 %.2f° (< 2°)").arg(angR));
+
+        const cv::Vec3d tn(geom.t.at<double>(0), geom.t.at<double>(1), geom.t.at<double>(2));
+        const cv::Vec3d tg(trel.at<double>(0), trel.at<double>(1), trel.at<double>(2));
+        const double cosT = normalized(tn).dot(normalized(tg));
+        const double angT = std::acos(std::max(-1.0, std::min(1.0, std::fabs(cosT))))
+                            * 180.0 / CV_PI;
+        check(angT < 5.0, QString("平移方向误差 %.2f° (< 5°)").arg(angT));
+
+        // 无内参时退化为 F 路径
+        const TwoViewGeometry geomNoK = estimateTwoViewGeometry(qa, qb, cv::Mat(), gopt);
+        check(geomNoK.config == TWO_VIEW_UNCALIBRATED || geomNoK.config == TWO_VIEW_PLANAR,
+              QString("无 K 时退化为 F/H 路径 (实际 %1)").arg(geomNoK.config));
+
+        // ── 平面场景 → PLANAR ──
+        std::vector<cv::Point2d> pa2, pb2;
+        for (int i = 0; i < 200; ++i) {
+            const cv::Vec3d P(rng.uniform(-2.0, 2.0), rng.uniform(-2.0, 2.0), 0.0);
+            const cv::Point2d a = project(P, R0, t0, K);
+            const cv::Point2d b = project(P, R1, t1, K);
+            pa2.emplace_back(a.x + rng.gaussian(0.2), a.y + rng.gaussian(0.2));
+            pb2.emplace_back(b.x + rng.gaussian(0.2), b.y + rng.gaussian(0.2));
+        }
+        // 掠射角平面：E 与 H 都能解释，H 反而拟合得更差 → 判 CALIBRATED 属正常，
+        // 这里只要求「几何仍然可用、不会被误杀」
+        const TwoViewGeometry geomPlanar = estimateTwoViewGeometry(pa2, pb2, K, gopt);
+        check(geomPlanar.valid() && geomPlanar.numInliers > 100,
+              QString("掠射平面场景几何仍可用（实际 cfg=%1, 内点 %2）")
+                  .arg(geomPlanar.config).arg(geomPlanar.numInliers));
+
+        // ── 纯旋转对（同一光心、绕光轴滚转）→ 不能当普通三维场景用 ──
+        cv::Mat R0b, t0b, R1b, t1b;
+        makePose(cv::Vec3d(5.0, -1.0, 0.5), R0b, t0b);
+        {
+            const double a = 15.0 * CV_PI / 180.0;
+            const cv::Mat Rz = (cv::Mat_<double>(3, 3) <<
+                std::cos(a), -std::sin(a), 0.0,
+                std::sin(a),  std::cos(a), 0.0,
+                0.0,          0.0,         1.0);
+            R1b = Rz * R0b;          // 绕相机光心旋转（光心不变）
+            t1b = Rz * t0b;
+        }
+        std::vector<cv::Point2d> pa3, pb3;
+        for (const auto &P : pts3d) {
+            pa3.push_back(project(P, R0b, t0b, K));
+            pb3.push_back(project(P, R1b, t1b, K));
+        }
+        const TwoViewGeometry geomRot = estimateTwoViewGeometry(pa3, pb3, K, gopt);
+        std::printf("     [diag] pure-rotation: cfg=%d E=%d H=%d frontRatio=%.2f\n",
+                    geomRot.config, geomRot.numEInliers,
+                    geomRot.numHInliers, geomRot.poseFrontRatio);
+        check(geomRot.config != TWO_VIEW_CALIBRATED,
+              QString("纯旋转对不判为 CALIBRATED（实际 %1）").arg(geomRot.config));
+
+        // ── 随机噪声对 → DEGENERATE ──
+        std::vector<cv::Point2d> ra, rb;
+        for (int i = 0; i < 200; ++i) {
+            ra.emplace_back(rng.uniform(0.0, static_cast<double>(kWidth)),
+                            rng.uniform(0.0, static_cast<double>(kHeight)));
+            rb.emplace_back(rng.uniform(0.0, static_cast<double>(kWidth)),
+                            rng.uniform(0.0, static_cast<double>(kHeight)));
+        }
+        const TwoViewGeometry geomRnd = estimateTwoViewGeometry(ra, rb, K, gopt);
+        check(!geomRnd.valid(), QString("随机点判定为 DEGENERATE (实际 %1)").arg(geomRnd.config));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[9] 引导匹配：被 Lowe 比率拒掉的真匹配由极线约束捞回\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        const int n = static_cast<int>(features[0].keypoints.size());
+        const std::vector<cv::Point2d> &p1 = matchPairs.front().points1;
+        const std::vector<cv::Point2d> &p2 = matchPairs.front().points2;
+
+        TwoViewGeometryOptions gopt;
+        gopt.ransacMaxErrorPx = 2.0;
+        const TwoViewGeometry geom = estimateTwoViewGeometry(p1, p2, K, gopt);
+        const bool geoOk = geom.valid() && !geom.F.empty() && geom.F.type() == CV_64F;
+        check(geoOk, "合成场景几何估计成功");
+        if (!geoOk) {
+            std::printf("  (跳过引导匹配用例：几何不可用)\n");
+        } else {
+
+        // 前 n/2 个点视为已匹配；后一半构造「真匹配排在第 2 位」的 KNN，
+        // 其 Lowe 比率 90/100 = 0.9 > 0.8 → 会被标准比率测试拒掉
+        const int half = n / 2;
+        std::vector<std::vector<cv::DMatch>> knn(static_cast<size_t>(n));
+        std::vector<uchar> usedQ(static_cast<size_t>(n), 0);
+        std::vector<uchar> usedT(static_cast<size_t>(n), 0);
+        for (int i = 0; i < half; ++i) {
+            knn[i].emplace_back(i, i, 0, 100.0f);
+            usedQ[i] = 1;
+            usedT[i] = 1;
+        }
+
+        int constructed = 0;
+        for (int i = half; i < n; ++i) {
+            // 找一个远离第 i 条极线的干扰点（保证不会被几何约束放过）
+            const double *f = geom.F.ptr<double>();
+            const cv::Vec3d line(f[0] * p1[i].x + f[1] * p1[i].y + f[2],
+                                 f[3] * p1[i].x + f[4] * p1[i].y + f[5],
+                                 f[6] * p1[i].x + f[7] * p1[i].y + f[8]);
+            const double denom = std::sqrt(line[0] * line[0] + line[1] * line[1]);
+            int decoy = -1;
+            for (int j = 0; j < n && decoy < 0; ++j) {
+                if (j == i) continue;
+                const double d = std::fabs(line[0] * p2[j].x + line[1] * p2[j].y + line[2]) / denom;
+                if (d > 40.0) decoy = j;
+            }
+            if (decoy < 0) continue;
+
+            knn[i].emplace_back(i, decoy, 0, 90.0f);   // 距离更近的错误候选
+            knn[i].emplace_back(i, i, 0, 100.0f);      // 真匹配排第 2
+            ++constructed;
+        }
+
+        std::vector<cv::DMatch> recovered;
+        const int added = guidedMatching(knn, p1, p2, geom, 2.0, 0.9,
+                                         usedQ, usedT, recovered);
+        check(added > 0, QString("引导匹配新增 %1 条").arg(added));
+
+        int correct = 0;
+        for (const auto &m : recovered) {
+            if (m.queryIdx == m.trainIdx) ++correct;
+        }
+        check(correct == added && added >= constructed - 2,
+              QString("捞回的 %1 条全部是正确对应（构造 %2 条）").arg(correct).arg(constructed));
+
+        // 无几何信息时不应产出任何匹配
+        std::vector<cv::DMatch> none;
+        check(guidedMatching(knn, p1, p2, TwoViewGeometry(), 2.0, 0.9,
+                             usedQ, usedT, none) == 0,
+              "无几何模型时引导匹配不产出结果");
+        }
     }
 
     std::printf("\n========== 结果: 通过 %d, 失败 %d ==========\n", g_passed, g_failed);

@@ -2,6 +2,7 @@
 
 #include "Initialization.h"
 #include "ThreadPool.h"
+#include "TwoViewGeometry.h"
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginRegistry.h"
 
@@ -9,11 +10,84 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <future>
+#include <iterator>
+#include <map>
 #include <optional>
 #include <set>
 
 #include <opencv2/opencv.hpp>
+
+namespace
+{
+
+/// 视图图连通性：统计连通分量个数与最大分量规模
+void graphComponents(const std::vector<MatchPair> &pairs,
+                     const std::vector<FeatureResult> &features,
+                     int &largestComponent,
+                     int &numComponents)
+{
+    const int N = static_cast<int>(features.size());
+    std::vector<int> indexOf(N, -1);
+    for (int k = 0; k < N; ++k) {
+        const int id = features[k].imageId;
+        if (id >= 0 && id < N) {
+            indexOf[id] = k;
+        }
+    }
+
+    std::vector<std::vector<int>> adj(N);
+    for (const MatchPair &mp : pairs) {
+        const int a = indexOf[mp.imageId1];
+        const int b = indexOf[mp.imageId2];
+        if (a < 0 || b < 0 || a == b) {
+            continue;
+        }
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    }
+
+    std::vector<char> visited(N, 0);
+    largestComponent = 0;
+    numComponents = 0;
+    for (int s = 0; s < N; ++s) {
+        if (visited[s]) {
+            continue;
+        }
+        ++numComponents;
+        int count = 0;
+        std::vector<int> stack{s};
+        visited[s] = 1;
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            ++count;
+            for (int v : adj[u]) {
+                if (!visited[v]) {
+                    visited[v] = 1;
+                    stack.push_back(v);
+                }
+            }
+        }
+        largestComponent = std::max(largestComponent, count);
+    }
+}
+
+const char *configName(int cfg)
+{
+    switch (cfg) {
+    case TWO_VIEW_CALIBRATED:   return "E";
+    case TWO_VIEW_UNCALIBRATED: return "F";
+    case TWO_VIEW_PLANAR:       return "H/planar";
+    case TWO_VIEW_PANORAMIC:    return "H/panoramic";
+    case TWO_VIEW_DEGENERATE:   return "degenerate";
+    default:                    return "undefined";
+    }
+}
+
+} // namespace
 
 MatcherService::MatcherService(PluginRegistry *registry, QObject *parent)
     : QObject(parent)
@@ -31,15 +105,274 @@ std::unique_ptr<IMatcherWorker> MatcherService::createMatcherWorker(
 
     // 剥离编排级参数，其余（normType/crossCheck/trees/checks 等）传给插件 Worker
     QJsonObject workerParams = params;
-    workerParams.remove("ratioThreshold");
-    workerParams.remove("ransacThreshold");
-    workerParams.remove("minMatchCount");
-    workerParams.remove("minMatchRatio");
-    workerParams.remove("matchingMode");
-    workerParams.remove("sequenceWindow");
-    workerParams.remove("exhaustiveMaxImages");
+    const char *orchestrationKeys[] = {
+        "ratioThreshold", "ransacThreshold", "minMatchCount", "minMatchRatio",
+        "minNumInliers", "guidedMatching", "guidedKnn", "guidedRatio",
+        "guidedBelowInliers", "adaptiveEdgeThreshold", "matchingMode",
+        "sequenceWindow", "exhaustiveMaxImages", "maxRansacTrials", "ransacConfidence"
+    };
+    for (const char *key : orchestrationKeys) {
+        workerParams.remove(QString::fromLatin1(key));
+    }
 
     return plugin->createWorker(workerParams);
+}
+
+// ───  matchAndVerifyPair  单对的匹配 + 几何验证 + 引导匹配  ─────────────────
+
+namespace
+{
+/// 单对匹配的分阶段耗时探针（仅在 debug 开关打开时输出）
+struct PairTimer
+{
+    double knn = 0.0, geom = 0.0, guided = 0.0, cut = 0.0;
+    void dump(int i, int j, int inliers) const
+    {
+        if (!(std::getenv("SFM_PAIR_TIMING"))) return;
+        std::fprintf(stdout,
+                     "[配对计时] #%d-#%d knn=%.1f geom=%.1f guided=%.1f cut=%.1f inliers=%d\n",
+                     i, j, knn, geom, guided, cut, inliers);
+        std::fflush(stdout);
+    }
+};
+} // namespace
+
+bool MatcherService::matchAndVerifyPair(int i, int j, IMatcherWorker *matcher,
+                                        const std::vector<FeatureResult> &features,
+                                        const cv::Mat &K,
+                                        const MatcherOptions &opt,
+                                        MatchPair &outPair) const
+{
+    const auto clk = [] {
+        return std::chrono::steady_clock::now();
+    };
+    PairTimer pt;
+
+    const auto &desc1 = features[i].descriptors;
+    const auto &desc2 = features[j].descriptors;
+    const auto &kpts1 = features[i].keypoints;
+    const auto &kpts2 = features[j].keypoints;
+
+    if (!matcher || desc1.empty() || desc2.empty()) {
+        return false;
+    }
+
+    // 1. 低层 KNN 匹配。
+    //
+    // 性能要点：底层 FLANN 每次 knnMatchPair 都会重建一棵索引树，单对 8000 点
+    // 的 SIFT 就要 ~700 ms，其中 k=5 与 k=2 的搜索开销相近（都受叶片遍历支配）。
+    // 所以固定跑 k=2（k 的大小对搜索成本影响很小，反而浪费）；引导匹配
+    // 直接在 k=2 候选上做（见步骤 4）。
+    std::vector<std::vector<cv::DMatch>> knnMatches;
+    const auto knnT0 = clk();
+    if (!matcher->knnMatchPair(desc1, desc2, knnMatches, 2)) {
+        return false;
+    }
+    pt.knn = std::chrono::duration<double, std::milli>(clk() - knnT0).count();
+
+    // 2. Lowe 比率测试
+    std::vector<cv::DMatch> goodMatches;
+    std::vector<cv::Point2d> pts1, pts2;
+    std::vector<uchar> usedQuery(knnMatches.size(), 0);
+    std::vector<uchar> usedTrain(kpts2.size(), 0);
+
+    // 抓取 knnMatches 中通过 Lowe 比率测试的最近邻，追加到 out（首次调用会
+    // 同时填充 usedQuery / usedTrain，深挖轮次直接复用既有占用表）
+    const auto applyKnn = [&](bool rebuildUsed) {
+        if (rebuildUsed) {
+            std::fill(usedQuery.begin(), usedQuery.end(), 0);
+            std::fill(usedTrain.begin(), usedTrain.end(), 0);
+        }
+        size_t before = goodMatches.size();
+        for (size_t qi = 0; qi < knnMatches.size(); ++qi) {
+            const auto &km = knnMatches[qi];
+            if (km.size() < 2) {
+                continue;
+            }
+            if (km[0].distance >= opt.ratioThreshold * km[1].distance) {
+                continue;
+            }
+            if (km[0].trainIdx < 0 || km[0].trainIdx >= static_cast<int>(kpts2.size())) {
+                continue;
+            }
+            if (rebuildUsed) {
+                usedQuery[qi] = 1;
+                usedTrain[km[0].trainIdx] = 1;
+            } else if (!usedQuery[qi] && !usedTrain[km[0].trainIdx]) {
+                usedQuery[qi] = 1;
+                usedTrain[km[0].trainIdx] = 1;
+            } else {
+                continue; // 与首轮重复
+            }
+            goodMatches.push_back(km[0]);
+            pts1.push_back(kpts1[km[0].queryIdx].pt);
+            pts2.push_back(kpts2[km[0].trainIdx].pt);
+        }
+        return goodMatches.size() - before;
+    };
+
+    applyKnn(true);
+    if (goodMatches.size() < 8) {
+        return false;
+    }
+
+    // 3. 两视图几何验证：已知 K 时直接估 E，否则估 F；同时估 H 判 PLANAR/PANORAMIC
+    TwoViewGeometryOptions gopt;
+    gopt.ransacMaxErrorPx = opt.ransacThresholdPx;
+    gopt.minNumInliers = opt.minNumInliers;
+    gopt.maxNumTrials = opt.maxRansacTrials;
+    gopt.confidence = opt.ransacConfidence;
+
+    const auto geomT0 = clk();
+    TwoViewGeometry geom = estimateTwoViewGeometry(pts1, pts2, K, gopt);
+    const double geomMs = std::chrono::duration<double, std::milli>(clk() - geomT0).count();
+    if (!geom.valid()) {
+        pt.geom = geomMs;
+        pt.dump(i, j, 0);
+        return false;
+    }
+
+    // 4. 引导匹配：用已估出的模型做空间约束，在 k=2 候选里二次捞取
+    //    被 Lowe 比率拒掉的真匹配后重估一次几何。
+    //    （实测：真实数据上引导增益为 0，因此不再为弱对补跑深 KNN ——
+    //     那会让弱对付出 2 倍 KNN + 2 倍几何的代价却一无所获）
+    const auto guidedT0 = clk();
+    if (opt.guidedMatching && geom.numInliers < opt.guidedBelowInliers) {
+        std::vector<cv::DMatch> extraMatches;
+        const int added = guidedMatching(knnMatches, pts1, pts2, geom,
+                                         opt.ransacThresholdPx, opt.guidedRatio,
+                                         usedQuery, usedTrain, extraMatches);
+        if (added > 0) {
+            for (const cv::DMatch &m : extraMatches) {
+                goodMatches.push_back(m);
+                pts1.push_back(kpts1[m.queryIdx].pt);
+                pts2.push_back(kpts2[m.trainIdx].pt);
+            }
+            const TwoViewGeometry geom2 = estimateTwoViewGeometry(pts1, pts2, K, gopt);
+            // 重估结果更差（例如引导进来一堆外点）则退回原模型，
+            // 此时 inlierMask 只覆盖前 goodMatches.size()-added 条，新增项自然被丢弃
+            if (geom2.valid() && geom2.numInliers >= geom.numInliers) {
+                geom = geom2;
+            }
+        }
+    }
+    pt.geom += std::chrono::duration<double, std::milli>(clk() - guidedT0).count();
+
+    // 5. 按内点掩码裁剪并组装 MatchPair
+    const auto cutT0 = clk();
+    MatchPair mp;
+    mp.imageId1 = features[i].imageId;
+    mp.imageId2 = features[j].imageId;
+
+    double distSum = 0.0;
+    const size_t n = std::min(goodMatches.size(), geom.inlierMask.size());
+    for (size_t k = 0; k < n; ++k) {
+        if (!geom.inlierMask[k]) {
+            continue;
+        }
+        mp.matches.push_back(goodMatches[k]);
+        mp.points1.push_back(pts1[k]);
+        mp.points2.push_back(pts2[k]);
+        distSum += goodMatches[k].distance;
+    }
+
+    mp.matchCount = static_cast<int>(mp.matches.size());
+    pt.cut = std::chrono::duration<double, std::milli>(clk() - cutT0).count();
+    pt.dump(i, j, mp.matchCount);
+    if (mp.matchCount < 8) {
+        return false;
+    }
+    mp.avgDistance = distSum / mp.matchCount;
+
+    mp.modelChoice = (geom.config == TWO_VIEW_PLANAR || geom.config == TWO_VIEW_PANORAMIC) ? 1 : 0;
+    mp.geometryConfig = geom.config;
+    if (!geom.F.empty()) mp.F = geom.F.clone();
+    if (!geom.H.empty()) mp.H = geom.H.clone();
+    if (!geom.E.empty()) mp.E = geom.E.clone();
+
+    outPair = std::move(mp);
+    return true;
+}
+
+// ───  verifyPairs  批量验证（串行 / 线程池并行）  ───────────────────────────
+
+std::vector<MatchPair> MatcherService::verifyPairs(
+    const std::vector<std::pair<int, int>> &pairs,
+    const std::vector<FeatureResult> &features,
+    const QString &matcherId,
+    const QJsonObject &params,
+    const cv::Mat &K,
+    const MatcherOptions &opt,
+    sfm::ThreadPool *threadPool,
+    std::function<void(const QString &)> logCallback) const
+{
+    std::vector<MatchPair> results;
+
+    if (pairs.empty()) {
+        return results;
+    }
+
+    if (threadPool && pairs.size() > 1) {
+        // 并行路径：每个图像对独立为一个任务，逐任务 createWorker() 独占实例
+        std::vector<std::future<std::optional<MatchPair>>> futures;
+        futures.reserve(pairs.size());
+
+        std::atomic<int> completedCount{0};
+        std::atomic<int> matchedCount{0};
+        const int logInterval = 5;
+        const int totalPairs = static_cast<int>(pairs.size());
+
+        for (const auto &[i, j] : pairs) {
+            futures.push_back(threadPool->submit(
+                [this, &matcherId, &params, &features, i, j, &K, &opt,
+                 &completedCount, &matchedCount, logInterval, totalPairs,
+                 &logCallback]() -> std::optional<MatchPair> {
+                    const int done = completedCount.fetch_add(1) + 1;
+                    auto logProgress = [&]() {
+                        if (logCallback && (done % logInterval == 0 || done == totalPairs)) {
+                            logCallback(QString("[特征匹配] 进度: %1/%2 对, 累计 %3 内点")
+                                            .arg(done).arg(totalPairs)
+                                            .arg(matchedCount.load()));
+                        }
+                    };
+
+                    auto localMatcher = createMatcherWorker(matcherId, params);
+                    if (!localMatcher) {
+                        logProgress();
+                        return std::nullopt;
+                    }
+
+                    MatchPair mp;
+                    if (!matchAndVerifyPair(i, j, localMatcher.get(), features, K, opt, mp)) {
+                        logProgress();
+                        return std::nullopt;
+                    }
+                    matchedCount.fetch_add(mp.matchCount);
+                    logProgress();
+                    return std::move(mp);
+                }));
+        }
+
+        for (auto &f : futures) {
+            auto result = f.get();
+            if (result) {
+                results.push_back(std::move(*result));
+            }
+        }
+    } else {
+        auto matcher = createMatcherWorker(matcherId, params);
+        if (!matcher) {
+            return results;
+        }
+        for (const auto &[i, j] : pairs) {
+            MatchPair mp;
+            if (matchAndVerifyPair(i, j, matcher.get(), features, K, opt, mp)) {
+                results.push_back(std::move(mp));
+            }
+        }
+    }
+
+    return results;
 }
 
 // ───  matchFeatures  特征匹配入口（编排）  ──────────────────────────────────
@@ -49,7 +382,8 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
                                    const QJsonObject &params,
                                    std::vector<MatchPair> &outPairs,
                                    sfm::ThreadPool *threadPool,
-                                   std::function<void(const QString &)> logCallback)
+                                   std::function<void(const QString &)> logCallback,
+                                   const cv::Mat &K)
 {
     outPairs.clear();
 
@@ -63,11 +397,30 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
         return false;
     }
 
-    // 2. 提取编排通用参数
-    double ratioThreshold = params.value("ratioThreshold").toDouble(0.8);
-    double ransacThreshold = params.value("ransacThreshold").toDouble(3.0);
-    int minMatchCount = params.value("minMatchCount").toInt(50);
-    double minMatchRatio = params.value("minMatchRatio").toDouble(0.05);
+    // 2. 编排参数
+    MatcherOptions opt;
+    opt.ratioThreshold = params.value("ratioThreshold").toDouble(0.8);
+    opt.minMatchCount = params.value("minMatchCount").toInt(30);
+    opt.minMatchRatio = params.value("minMatchRatio").toDouble(0.02);
+    opt.minNumInliers = params.value("minNumInliers").toInt(15);
+    opt.guidedMatching = params.value("guidedMatching").toBool(true);
+    opt.guidedKnn = params.value("guidedKnn").toInt(5);
+    opt.guidedRatio = params.value("guidedRatio").toDouble(0.9);
+    opt.guidedBelowInliers = params.value("guidedBelowInliers").toInt(500);
+    opt.adaptiveEdgeThreshold = params.value("adaptiveEdgeThreshold").toBool(true);
+    opt.maxRansacTrials = params.value("maxRansacTrials").toInt(10000);
+    opt.ransacConfidence = params.value("ransacConfidence").toDouble(0.9999);
+
+    // RANSAC 阈值：显式配置优先，否则按图像分辨率自适应（旧实现固定 3px 不随分辨率缩放）
+    if (params.contains("ransacThreshold")) {
+        opt.ransacThresholdPx = params.value("ransacThreshold").toDouble(3.0);
+    } else {
+        int maxDim = 0;
+        for (const auto &f : features) {
+            maxDim = std::max(maxDim, std::max(f.imageWidth, f.imageHeight));
+        }
+        opt.ransacThresholdPx = adaptiveRansacThresholdPx(maxDim, maxDim);
+    }
 
     const int N = static_cast<int>(features.size());
 
@@ -75,9 +428,6 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
     //    sequential：每张图像与其后 sequenceWindow 张图匹配（历史行为，窗口现可配）
     //    exhaustive：所有图像两两匹配
     //    auto：小规模数据集（≤ exhaustiveMaxImages）自动走穷举
-    //
-    //    原先窗口硬编码为 5，无序数据集或相邻帧视角跨度大的数据集会漏掉
-    //    大量真实重叠对，视图图退化甚至断裂，后续增量重建无从谈起。
     const QString matchingMode =
         params.value(QStringLiteral("matchingMode")).toString(QStringLiteral("auto")).toLower();
     const int sequenceWindow =
@@ -96,8 +446,6 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
                 candidatePairs.push_back({i, j});
             }
         }
-        qDebug().noquote()
-            << QString("[匹配] 图像数=%1, 穷举匹配 %2 对").arg(N).arg(candidatePairs.size());
     } else {
         candidatePairs.reserve(static_cast<size_t>(N) * std::max(1, sequenceWindow));
         for (int i = 0; i < N; ++i) {
@@ -105,10 +453,20 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
                 candidatePairs.push_back({i, i + k});
             }
         }
-        qDebug().noquote()
-            << QString("[匹配] 图像数=%1, 序列匹配(窗口=%2) %3 对")
-                   .arg(N).arg(sequenceWindow).arg(candidatePairs.size());
     }
+
+    if (logCallback) {
+        logCallback(QString("[匹配] 图像数=%1, 候选对=%2 (%3), 几何阈值=%4 px, 引导匹配=%5")
+                        .arg(N).arg(candidatePairs.size())
+                        .arg(useExhaustive ? "穷举" : QString("序列窗口%1").arg(sequenceWindow))
+                        .arg(opt.ransacThresholdPx, 0, 'f', 2)
+                        .arg(opt.guidedMatching ? "开" : "关"));
+    }
+    qDebug().noquote()
+        << QString("[匹配] 图像数=%1, 候选对=%2, 模式=%3, 几何阈值=%4px")
+               .arg(N).arg(candidatePairs.size())
+               .arg(useExhaustive ? "exhaustive" : "sequential")
+               .arg(opt.ransacThresholdPx, 0, 'f', 2);
 
     // 记录已经尝试过的图像对，避免序列匹配失败的组合在传递性阶段被重复尝试
     std::set<std::pair<int, int>> attempted;
@@ -116,103 +474,46 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
         attempted.insert({std::min(i, j), std::max(i, j)});
     }
 
-    // 辅助lambda：处理一批候选对，支持串行或并行
-    auto processPairs = [&](const std::vector<std::pair<int, int>> &pairs) {
-        if (threadPool && pairs.size() > 1) {
-            // 并行路径：每个图像对独立为一个任务。
-            // 每个任务通过匹配器插件工厂 createWorker() 获取独占实例，
-            // 符合"工厂无状态 + Worker 逐任务独占"的插件并发规范。
-            std::vector<std::future<std::optional<MatchPair>>> futures;
-            futures.reserve(pairs.size());
+    // 4. 几何验证（保留全部通过几何验证的对，建边阈值稍后按需放宽）
+    std::vector<MatchPair> allVerified = verifyPairs(candidatePairs, features, matcherId,
+                                                     params, K, opt, threadPool, logCallback);
+    if (allVerified.empty()) {
+        return false;
+    }
 
-            // 日志频率限制：使用原子计数器，每完成 5 对输出一次汇总日志
-            std::atomic<int> completedCount{0};
-            std::atomic<int> matchedCount{0};
-            const int logInterval = 5;
-            const int totalPairs = static_cast<int>(pairs.size());
+    // 5. 建边阈值阶梯：先严后宽。视图图一旦不连通，后续增量重建必然丢图像
+    struct EdgeLevel { int minCount; double minRatio; };
+    std::vector<EdgeLevel> ladder;
+    ladder.push_back({opt.minMatchCount, opt.minMatchRatio});
+    if (opt.adaptiveEdgeThreshold) {
+        ladder.push_back({std::max(8, opt.minMatchCount * 2 / 3), opt.minMatchRatio * 0.5});
+        ladder.push_back({std::max(8, opt.minMatchCount / 3), opt.minMatchRatio * 0.25});
+        ladder.push_back({8, opt.minMatchRatio * 0.1});
+        ladder.push_back({8, 0.0});
+    }
 
-            for (const auto &[i, j] : pairs) {
-                futures.push_back(threadPool->submit(
-                    [this, &matcherId, &params, &features, i, j,
-                     ratioThreshold, ransacThreshold, minMatchCount, minMatchRatio,
-                     &completedCount, &matchedCount, logInterval, totalPairs,
-                     &logCallback]() -> std::optional<MatchPair> {
-                         int done = completedCount.fetch_add(1) + 1;
-                         auto logProgress = [&]() {
-                             if (logCallback && (done % logInterval == 0 || done == totalPairs)) {
-                                 logCallback(QString("[特征匹配] 进度: %1/%2 对, 累计 %3 内点")
-                                                 .arg(done).arg(totalPairs)
-                                                 .arg(matchedCount.load()));
-                             }
-                         };
-
-                         auto localMatcher = createMatcherWorker(matcherId, params);
-                         if (!localMatcher) { logProgress(); return std::nullopt; }
-
-                         MatchPair mp;
-                         if (!matchAndVerifyPair(i, j, localMatcher.get(), features,
-                                                 ratioThreshold, ransacThreshold, mp)) {
-                             logProgress();
-                             return std::nullopt;
-                         }
-                         if (!shouldAddEdge(mp, features, minMatchCount, minMatchRatio)) {
-                             logProgress();
-                             return std::nullopt;
-                         }
-                         matchedCount.fetch_add(static_cast<int>(mp.matches.size()));
-                         logProgress();
-                         return std::move(mp);
-                     }));
-            }
-
-            for (auto &f : futures) {
-                auto result = f.get();
-                if (result) {
-                    attempted.insert({result->imageId1, result->imageId2});
-                    outPairs.push_back(std::move(*result));
-                }
-            }
-        } else {
-            // 串行路径：复用同一个低层 Worker 实例
-            auto matcher = createMatcherWorker(matcherId, params);
-            if (!matcher) {
-                return;
-            }
-
-            for (const auto &[i, j] : pairs) {
-                MatchPair mp;
-                if (!matchAndVerifyPair(i, j, matcher.get(), features,
-                                        ratioThreshold, ransacThreshold, mp)) {
-                    continue;
-                }
-                if (!shouldAddEdge(mp, features, minMatchCount, minMatchRatio)) {
-                    continue;
-                }
-                attempted.insert({mp.imageId1, mp.imageId2});
-                outPairs.push_back(std::move(mp));
+    auto selectEdges = [&](const EdgeLevel &lv) {
+        outPairs.clear();
+        for (const MatchPair &mp : allVerified) {
+            if (shouldAddEdge(mp, features, lv.minCount, lv.minRatio)) {
+                outPairs.push_back(mp);
             }
         }
     };
 
-    // 4. 对序列候选对进行匹配、验证，并按阈值决定是否加入视图图
-    processPairs(candidatePairs);
-
-    // 5. 传递性匹配：将已验证匹配视为无向图边，对距离为 2 的节点对尝试匹配
-    //    迭代直到不再新增边，或达到最大迭代次数
+    // 6. 传递性匹配：将已验证匹配视为无向图边，对距离为 2 的节点对尝试匹配
     const int maxTransitiveIterations = 5;
     for (int iter = 0; iter < maxTransitiveIterations; ++iter) {
+        selectEdges(ladder.front());
         ViewGraph graph = ViewGraph::buildFromPairs(outPairs, N);
 
-        // 收集所有图距离为 2 且尚未直接相连/未尝试过的无序节点对
         std::vector<std::pair<int, int>> distance2Pairs;
         for (int u = 0; u < N; ++u) {
-            std::vector<int> uNeighbors = graph.neighbors(u);
-            for (int v : uNeighbors) {
-                std::vector<int> vNeighbors = graph.neighbors(v);
-                for (int w : vNeighbors) {
+            for (int v : graph.neighbors(u)) {
+                for (int w : graph.neighbors(v)) {
                     if (w == u) continue;                       // 忽略回到起点的边
-                    int a = std::min(u, w);
-                    int b = std::max(u, w);
+                    const int a = std::min(u, w);
+                    const int b = std::max(u, w);
                     if (attempted.count({a, b})) continue;      // 已尝试过，跳过
                     if (graph.edgeWeight(u, w) > 0) continue;   // 已存在直接边
                     distance2Pairs.push_back({a, b});
@@ -229,113 +530,77 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
             << QString("[匹配] 传递性迭代 %1: 发现 %2 对距离-2 候选")
                    .arg(iter + 1).arg(distance2Pairs.size());
 
-        const size_t before = outPairs.size();
-        processPairs(distance2Pairs);
-        const bool addedThisIter = outPairs.size() > before;
-
-        if (!addedThisIter) {
-            break; // 本迭代没有新增边，后续迭代也不会再新增
+        const size_t before = allVerified.size();
+        auto more = verifyPairs(distance2Pairs, features, matcherId, params, K, opt,
+                                threadPool, logCallback);
+        if (more.empty()) {
+            break;
+        }
+        allVerified.insert(allVerified.end(),
+                           std::make_move_iterator(more.begin()),
+                           std::make_move_iterator(more.end()));
+        if (allVerified.size() == before) {
+            break;
         }
     }
 
+    // 7. 按阶梯逐级放宽建边，直到视图图连通或不再有增益
+    std::vector<MatchPair> bestPairs;
+    int bestLargest = -1;
+    for (size_t s = 0; s < ladder.size(); ++s) {
+        selectEdges(ladder[s]);
+        int largest = 0, comps = 0;
+        graphComponents(outPairs, features, largest, comps);
+
+        if (logCallback) {
+            logCallback(QString("[匹配] 建边档位 %1: 阈值(≥%2, ≥%3) → 边 %4 条, 连通分量 %5, 最大分量 %6/%7")
+                            .arg(s + 1).arg(ladder[s].minCount)
+                            .arg(ladder[s].minRatio, 0, 'f', 4)
+                            .arg(outPairs.size()).arg(comps).arg(largest).arg(N));
+        }
+
+        if (comps <= 1) {
+            bestPairs = outPairs;
+            break;
+        }
+        if (largest > bestLargest) {
+            bestLargest = largest;
+            bestPairs = outPairs;
+        } else {
+            break; // 放宽没有带来连通性增益，再放宽只会引入噪声
+        }
+    }
+    outPairs = bestPairs;
+
+    // 8. 统计
+    int sumInliers = 0;
+    std::map<int, int> configHist;
+    for (const MatchPair &mp : outPairs) {
+        sumInliers += mp.matchCount;
+        configHist[mp.geometryConfig]++;
+    }
+    QString cfgStr;
+    for (const auto &[cfg, cnt] : configHist) {
+        cfgStr += QString("%1×%2  ").arg(configName(cfg)).arg(cnt);
+    }
     qDebug().noquote()
-        << QString("[匹配] 最终有效匹配对: %1").arg(outPairs.size());
+        << QString("[匹配] 最终有效匹配对: %1, 内点合计 %2, 平均 %3 | 几何类型: %4")
+               .arg(outPairs.size()).arg(sumInliers)
+               .arg(outPairs.empty() ? 0.0 : static_cast<double>(sumInliers) / outPairs.size(), 0, 'f', 1)
+               .arg(cfgStr);
+    if (logCallback) {
+        logCallback(QString("[匹配] 最终 %1 对, 平均内点 %2 | 几何类型: %3")
+                        .arg(outPairs.size())
+                        .arg(outPairs.empty() ? 0.0 : static_cast<double>(sumInliers) / outPairs.size(), 0, 'f', 1)
+                        .arg(cfgStr));
+    }
+
     return !outPairs.empty();
-}
-
-bool MatcherService::matchAndVerifyPair(int i, int j, IMatcherWorker *matcher,
-                                        const std::vector<FeatureResult> &features,
-                                        double ratioThreshold,
-                                        double ransacThreshold,
-                                        MatchPair &outPair) const
-{
-    const auto &desc1 = features[i].descriptors;
-    const auto &desc2 = features[j].descriptors;
-    const auto &kpts1 = features[i].keypoints;
-    const auto &kpts2 = features[j].keypoints;
-
-    if (!matcher || desc1.empty() || desc2.empty()) {
-        return false;
-    }
-
-    // 4a. 低层 KNN 匹配（匹配器插件 Worker）
-    std::vector<std::vector<cv::DMatch>> knnMatches;
-    if (!matcher->knnMatchPair(desc1, desc2, knnMatches, 2)) {
-        return false;
-    }
-
-    // 4b. Lowe 比率测试：过滤歧义匹配
-    std::vector<cv::DMatch> goodMatches;
-    for (const auto &km : knnMatches) {
-        if (km.size() >= 2) {
-            if (km[0].distance < ratioThreshold * km[1].distance) {
-                goodMatches.push_back(km[0]);
-            }
-        }
-    }
-
-    if (goodMatches.empty()) {
-        return false;
-    }
-
-    // 4c. GRIC 验证：同时估计 F 和 H，用 GRIC 选择更适合当前场景的模型
-    std::vector<cv::Point2d> pts1, pts2;
-    pts1.reserve(goodMatches.size());
-    pts2.reserve(goodMatches.size());
-    for (const auto &m : goodMatches) {
-        pts1.push_back(kpts1[m.queryIdx].pt);
-        pts2.push_back(kpts2[m.trainIdx].pt);
-    }
-
-    std::vector<uchar> inliers;
-    cv::Mat F, H;
-    int modelChoice = Initialization::instance()->selectModel(
-        pts1, pts2, F, H, inliers, 1.0, ransacThreshold);
-
-    if (inliers.empty()) {
-        return false;
-    }
-
-    std::vector<cv::DMatch> verifiedMatches;
-    for (size_t k = 0; k < inliers.size(); ++k) {
-        if (inliers[k]) {
-            verifiedMatches.push_back(goodMatches[k]);
-        }
-    }
-
-    if (verifiedMatches.size() < 8) {
-        return false;
-    }
-
-    // 4d. 组装 MatchPair
-    MatchPair mp;
-    mp.imageId1 = features[i].imageId;
-    mp.imageId2 = features[j].imageId;
-    mp.matches = std::move(verifiedMatches);
-    mp.matchCount = static_cast<int>(mp.matches.size());
-    mp.modelChoice = modelChoice;
-    mp.F = F.clone();
-    mp.H = H.clone();
-
-    mp.points1.reserve(mp.matches.size());
-    mp.points2.reserve(mp.matches.size());
-
-    double distSum = 0.0;
-    for (const auto &m : mp.matches) {
-        mp.points1.push_back(kpts1[m.queryIdx].pt);
-        mp.points2.push_back(kpts2[m.trainIdx].pt);
-        distSum += m.distance;
-    }
-    mp.avgDistance = mp.matchCount > 0 ? distSum / mp.matchCount : 0.0;
-
-    outPair = std::move(mp);
-    return true;
 }
 
 bool MatcherService::shouldAddEdge(const MatchPair &mp,
                                    const std::vector<FeatureResult> &features,
-                                   int minMatchCount,
-                                   double minMatchRatio) const
+                                   int minMatchCount, double minMatchRatio) const
 {
     int count = mp.matchCount;
     if (count <= 0) {

@@ -28,6 +28,7 @@ HEADERS += \
     algorithm/ThreadPool.h \
     algorithm/SfmLogger.h \
     algorithm/SfmGeometry.h \
+    algorithm/TwoViewGeometry.h \
     algorithm/CorrespondenceGraph.h \
     algorithm/ObservationManager.h \
     algorithm/IncrementalTriangulator.h \
@@ -54,6 +55,7 @@ SOURCES += \
     builtin/registerBuiltIn.cpp \
     algorithm/ThreadPool.cpp \
     algorithm/SfmLogger.cpp \
+    algorithm/TwoViewGeometry.cpp \
     algorithm/CorrespondenceGraph.cpp \
     algorithm/ObservationManager.cpp \
     algorithm/IncrementalTriangulator.cpp \

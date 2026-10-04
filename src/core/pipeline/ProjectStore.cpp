@@ -18,7 +18,8 @@ namespace {
 
 constexpr int kManifestVersion = 1;
 constexpr int kPosesVersion = 1;
-constexpr int kPairsVersion = 1;
+// v2：MatchPair 新增本质矩阵 E 与两视图几何配置 geometryConfig（阶段三）
+constexpr int kPairsVersion = 2;
 const char kPairsMagic[] = "SFMPAIRS";
 
 // ── JSON 辅助：cv::Mat ↔ QJsonArray ──
@@ -320,6 +321,8 @@ bool writeMatchPairs(const QString &filePath, const std::vector<MatchPair> &pair
 
         writeMatBin(s, mp.F);
         writeMatBin(s, mp.H);
+        writeMatBin(s, mp.E);
+        s << qint32(mp.geometryConfig);
     }
     file.close();
     return true;
@@ -381,6 +384,12 @@ bool readMatchPairs(const QString &filePath, std::vector<MatchPair> *out, QStrin
 
         mp.F = readMatBin(s);
         mp.H = readMatBin(s);
+        if (version >= 2) {
+            mp.E = readMatBin(s);
+            qint32 cfg = 0;
+            s >> cfg;
+            mp.geometryConfig = cfg;
+        }
         pairs.push_back(std::move(mp));
     }
     file.close();
