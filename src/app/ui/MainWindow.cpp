@@ -248,13 +248,17 @@ void MainWindow::setupCentralWidget()
     // 稀疏重建对话框（非模态，经菜单"重建 → 稀疏重建"打开）
     m_sparseDialog = new SparseReconstructionDialog(m_registry, this);
 
-    // 最右侧日志收展按钮：点击隐藏/显示日志面板
+    // 最右侧日志收展按钮：竖向高亮条，点击隐藏/显示日志面板
     m_logToggle = new QToolButton(this);
     m_logToggle->setArrowType(Qt::RightArrow);
     m_logToggle->setToolTip(tr("隐藏日志"));
-    m_logToggle->setFixedWidth(18);
+    m_logToggle->setFixedWidth(22);
     m_logToggle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
-    m_logToggle->setAutoRaise(true);
+    m_logToggle->setStyleSheet(
+        QStringLiteral(
+            "QToolButton { background: #3d4450; border: none; border-left: 1px solid #5a626e; }"
+            "QToolButton:hover { background: #4a90d9; }"
+            "QToolButton:pressed { background: #3a7bbf; }"));
     connect(m_logToggle, &QToolButton::clicked,
             this, &MainWindow::onToggleLogPanel);
 
@@ -279,8 +283,6 @@ void MainWindow::connectSignals()
             this, &MainWindow::markDirty);
     connect(m_configPanel, &ConfigPanel::configChanged,
             this, &MainWindow::markDirty);
-    connect(m_configPanel, &ConfigPanel::denseReconstructionRequested,
-            this, &MainWindow::onDenseReconstruction);
     connect(m_configPanel, &ConfigPanel::cameraFrustaVisibleChanged,
             this, [this](bool visible) {
                 m_pointCloudWidget->setCameraFrustaVisible(visible);
@@ -331,7 +333,6 @@ void MainWindow::onCreateProject()
     m_configPanel->setProjectSummary(m_projectName,
                                      tr("%1 张图像").arg(dlg.imageFiles().size()));
     m_configPanel->setProjectLoaded(true);
-    m_configPanel->resetResults();
     m_sparseDialog->setStartEnabled(true);
 
     markDirty();
@@ -386,11 +387,6 @@ bool MainWindow::openProject(const QString &manifestPath)
                                      tr("%1 张图像").arg(m.imageFiles.size()));
     m_configPanel->setProjectLoaded(true);
     m_sparseDialog->setStartEnabled(true);
-
-    // 回填结果区（已保存的密集点云 → 隐藏密集按钮）
-    m_configPanel->setSparseResult();
-    if (m_pipeline->lastOutput().denseCloud && !m_pipeline->lastOutput().denseCloud->empty())
-        m_configPanel->setDenseResult();
 
     // 图像缺失检查：影响完整重建，不影响查看与密集续算
     QStringList missing;
@@ -691,12 +687,6 @@ void MainWindow::onPipelineFinished(bool success)
 
     loadAndDisplayCloudFromOutput();
 
-    // 密集点云就绪则隐藏密集重建按钮（重跑走菜单）
-    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &dense =
-        m_pipeline ? m_pipeline->lastOutput().denseCloud : nullptr;
-    if (dense && !dense->empty())
-        m_configPanel->setDenseResult();
-
     // 自动保存项目结果（点云 + 相机参数 + 匹配对 + 清单）
     if (!m_projectDir.isEmpty() && m_pipeline) {
         QString error;
@@ -721,10 +711,6 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
 
     // 阶段点云就绪即同步相机位姿金字塔（稀疏完成时 lastOutput 已含位姿）
     updateCameraFrustaFromOutput();
-
-    // 稀疏完成：显示结果区（密集重建入口；密集继续在后台进行）
-    if (stageName == QStringLiteral("sparse") && m_pipeline)
-        m_configPanel->setSparseResult();
 }
 
 void MainWindow::updateStatusLabel()

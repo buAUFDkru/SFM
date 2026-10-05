@@ -12,7 +12,6 @@
 #include <QFileInfo>
 #include <QGroupBox>
 #include <QLabel>
-#include <QPushButton>
 #include <QRegularExpression>
 #include <QTextStream>
 #include <QVBoxLayout>
@@ -58,19 +57,6 @@ void ConfigPanel::setupUI()
 
     layout->addWidget(projectBox);
 
-    // ── 结果区（稀疏完成后显示密集重建入口；不再显示点数） ──
-    m_resultBox = new QGroupBox(tr("结果"), container);
-    m_resultBox->setObjectName(QStringLiteral("resultBox"));
-    auto *resultLayout = new QVBoxLayout(m_resultBox);
-
-    m_denseButton = new QPushButton(tr("密集重建..."), m_resultBox);
-    connect(m_denseButton, &QPushButton::clicked,
-            this, &ConfigPanel::denseReconstructionRequested);
-    resultLayout->addWidget(m_denseButton);
-
-    m_resultBox->setVisible(false);
-    layout->addWidget(m_resultBox);
-
     // ── 显示选项 ──
     auto *displayBox = new QGroupBox(tr("显示"), container);
     auto *displayLayout = new QVBoxLayout(displayBox);
@@ -113,24 +99,6 @@ void ConfigPanel::setFixedCameraMatrix(const cv::Mat &K, bool fixed)
 {
     m_cameraMatrix = K.clone();
     m_fixCameraMatrix = fixed && !K.empty();
-}
-
-void ConfigPanel::setSparseResult()
-{
-    m_resultBox->setVisible(true);
-}
-
-void ConfigPanel::setDenseResult()
-{
-    // 密集已完成，去掉密集重建入口（重跑走菜单"重建 → 密集重建"）
-    m_resultBox->setVisible(true);
-    m_denseButton->setVisible(false);
-}
-
-void ConfigPanel::resetResults()
-{
-    m_resultBox->setVisible(false);
-    m_denseButton->setVisible(true);   // 恢复密集重建入口
 }
 
 void ConfigPanel::setCameraFrustaChecked(bool checked)

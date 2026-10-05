@@ -514,36 +514,11 @@ private slots:
     }
 };
 
-/// ConfigPanel / 稀疏重建对话框状态：结果区/运行锁定/相机开关
+/// ConfigPanel / 稀疏重建对话框状态：运行锁定/相机开关
 class TestConfigPanelStates : public QObject
 {
     Q_OBJECT
 private slots:
-    void sparseResultShowsDenseEntry()
-    {
-        PluginRegistry &reg = PluginRegistry::instance();
-        ConfigPanel panel(&reg);
-        auto *resultBox = panel.findChild<QGroupBox *>(QStringLiteral("resultBox"));
-        CHECK_UI(resultBox != nullptr && !resultBox->isVisibleTo(&panel), "结果区初始隐藏");
-
-        panel.setSparseResult();
-        CHECK_UI(resultBox && resultBox->isVisibleTo(&panel), "稀疏完成后结果区显示");
-        // 结果区不再显示点数文本（只有密集重建入口按钮）
-        CHECK_UI(resultBox->findChildren<QLabel *>().isEmpty(), "结果区无点数文本");
-        auto *denseBtn = resultBox->findChild<QPushButton *>();
-        CHECK_UI(denseBtn != nullptr && denseBtn->isVisibleTo(&panel),
-                 "稀疏完成后密集重建按钮可用");
-
-        panel.setDenseResult();
-        CHECK_UI(denseBtn != nullptr && !denseBtn->isVisibleTo(&panel),
-                 "密集完成后隐藏密集重建按钮");
-
-        panel.resetResults();
-        CHECK_UI(resultBox && !resultBox->isVisibleTo(&panel), "重置后结果区隐藏");
-        // resultBox 自身隐藏，按钮以相对 resultBox 的可见性断言恢复
-        CHECK_UI(denseBtn && denseBtn->isVisibleTo(resultBox), "重置后恢复密集重建按钮");
-    }
-
     void runningLocksTask()
     {
         PluginRegistry &reg = PluginRegistry::instance();
