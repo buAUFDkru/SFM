@@ -15,6 +15,8 @@ class QAction;
 class QLabel;
 class QMenu;
 class QSplitter;
+class SparseReconstructionDialog;
+class QToolButton;
 
 /// 相机金字塔几何数据（线框 + 底面四角 + 对应图像路径）
 struct CameraFrustumGeometry
@@ -80,6 +82,8 @@ private slots:
     void onStartReconstruction();
     void onStopReconstruction();
     void onDenseReconstruction();
+    void onShowSparseReconstruction();
+    void onToggleLogPanel();
     void onResetView();
     void onTopView();
     void onFrontView();
@@ -120,8 +124,9 @@ private:
     ConfigPanel *m_configPanel = nullptr;
     PointCloudWidget *m_pointCloudWidget = nullptr;
     LogConsole *m_logConsole = nullptr;
+    SparseReconstructionDialog *m_sparseDialog = nullptr;
+    QToolButton *m_logToggle = nullptr;
     QLabel *m_statusLabel = nullptr;
-    QLabel *m_threadLabel = nullptr;
     QMenu *m_recentMenu = nullptr;
     QAction *m_frustaAction = nullptr;  ///< 视图菜单"显示相机位姿"（与面板复选框同步）
 

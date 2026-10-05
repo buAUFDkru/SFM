@@ -37,6 +37,7 @@
 #include "ParamWidget/AlgorithmComboPanel.h"
 #include "ConfigPanel.h"
 #include "DenseReconstructionDialog.h"
+#include "SparseReconstructionDialog.h"
 #include "LogWidget/LogConsole.h"
 #include "ControlButtons.h"
 #include "ViewWidget/PointCloudWidget.h"
@@ -335,22 +336,26 @@ private slots:
         }
     }
 
-    /// 回归：ConfigPanel 默认算法为 SIFT + FLANN
+    /// 回归：默认算法为 SIFT + FLANN（现在由稀疏重建对话框承载）
     void configPanelDefaults()
     {
         PluginRegistry &reg = PluginRegistry::instance();
         ConfigPanel panel(&reg);
-        const ReconstructionConfig cfg = panel.gatherConfig();
-        CHECK_UI(cfg.descriptorType == QStringLiteral("SIFT"), "默认描述符 SIFT");
-        CHECK_UI(cfg.matcherType == QStringLiteral("FLANN"), "默认匹配器 FLANN");
-        CHECK_UI(!cfg.descriptorParams.isEmpty(), "SIFT 参数已收集");
-        CHECK_UI(!cfg.matcherParams.isEmpty(), "FLANN 参数已收集");
+        SparseReconstructionDialog dlg(&reg);
+
+        QString descType, matchType;
+        QJsonObject descParams, matchParams;
+        dlg.gatherAlgorithms(descType, descParams, matchType, matchParams);
+        CHECK_UI(descType == QStringLiteral("SIFT"), "默认描述符 SIFT");
+        CHECK_UI(matchType == QStringLiteral("FLANN"), "默认匹配器 FLANN");
+        CHECK_UI(!descParams.isEmpty(), "SIFT 参数已收集");
+        CHECK_UI(!matchParams.isEmpty(), "FLANN 参数已收集");
 
         // 回归：未加载项目时开始按钮禁用，加载后启用
-        auto *startBtn = panel.findChild<QPushButton *>(QStringLiteral("startBtn"));
+        auto *startBtn = dlg.findChild<QPushButton *>(QStringLiteral("startBtn"));
         CHECK_UI(startBtn != nullptr, "开始按钮存在");
         CHECK_UI(startBtn && !startBtn->isEnabled(), "未加载项目时开始按钮禁用");
-        panel.setProjectLoaded(true);
+        dlg.setStartEnabled(true);
         CHECK_UI(startBtn && startBtn->isEnabled(), "加载项目后开始按钮启用");
     }
 };
@@ -509,37 +514,31 @@ private slots:
     }
 };
 
-/// ConfigPanel 上下文状态：结果区/任务区折叠/运行锁定/相机开关
+/// ConfigPanel / 稀疏重建对话框状态：结果区/运行锁定/相机开关
 class TestConfigPanelStates : public QObject
 {
     Q_OBJECT
 private slots:
-    void sparseResultCollapsesTask()
+    void sparseResultShowsDenseEntry()
     {
         PluginRegistry &reg = PluginRegistry::instance();
         ConfigPanel panel(&reg);
-        auto *taskBody = panel.findChild<QWidget *>(QStringLiteral("taskBody"));
         auto *resultBox = panel.findChild<QGroupBox *>(QStringLiteral("resultBox"));
-        CHECK_UI(taskBody != nullptr && taskBody->isVisibleTo(&panel), "任务区初始展开");
         CHECK_UI(resultBox != nullptr && !resultBox->isVisibleTo(&panel), "结果区初始隐藏");
 
-        panel.setSparseResult(1234);
-        CHECK_UI(taskBody && !taskBody->isVisibleTo(&panel), "稀疏完成后任务区折叠");
+        panel.setSparseResult();
         CHECK_UI(resultBox && resultBox->isVisibleTo(&panel), "稀疏完成后结果区显示");
-        const QList<QLabel *> labels = resultBox->findChildren<QLabel *>();
-        CHECK_UI(labels.size() >= 2 && labels[0]->text().contains(QStringLiteral("1234")),
-                 "稀疏结果点数文本");
-
-        panel.setDenseResult(5678);
-        CHECK_UI(labels.size() >= 2 && labels[1]->isVisibleTo(&panel) &&
-                     labels[1]->text().contains(QStringLiteral("5678")), "密集结果行");
-        // 密集完成后去掉密集重建按钮
+        // 结果区不再显示点数文本（只有密集重建入口按钮）
+        CHECK_UI(resultBox->findChildren<QLabel *>().isEmpty(), "结果区无点数文本");
         auto *denseBtn = resultBox->findChild<QPushButton *>();
+        CHECK_UI(denseBtn != nullptr && denseBtn->isVisibleTo(&panel),
+                 "稀疏完成后密集重建按钮可用");
+
+        panel.setDenseResult();
         CHECK_UI(denseBtn != nullptr && !denseBtn->isVisibleTo(&panel),
                  "密集完成后隐藏密集重建按钮");
 
         panel.resetResults();
-        CHECK_UI(taskBody && taskBody->isVisibleTo(&panel), "重置后任务区展开");
         CHECK_UI(resultBox && !resultBox->isVisibleTo(&panel), "重置后结果区隐藏");
         // resultBox 自身隐藏，按钮以相对 resultBox 的可见性断言恢复
         CHECK_UI(denseBtn && denseBtn->isVisibleTo(resultBox), "重置后恢复密集重建按钮");
@@ -548,18 +547,16 @@ private slots:
     void runningLocksTask()
     {
         PluginRegistry &reg = PluginRegistry::instance();
-        ConfigPanel panel(&reg);
-        panel.setProjectLoaded(true);
+        SparseReconstructionDialog dlg(&reg);
+        dlg.setStartEnabled(true);
         const QList<AlgorithmComboPanel *> algos =
-            panel.findChildren<AlgorithmComboPanel *>();
+            dlg.findChildren<AlgorithmComboPanel *>();
         CHECK_UI(algos.size() == 2, "两个算法面板");
 
-        panel.setRunning(true);
+        dlg.setRunning(true);
         CHECK_UI(!algos[0]->isEnabled() && !algos[1]->isEnabled(), "运行中算法区锁定");
-        auto *taskBody = panel.findChild<QWidget *>(QStringLiteral("taskBody"));
-        CHECK_UI(taskBody && taskBody->isVisibleTo(&panel), "运行中任务区强制展开");
 
-        panel.setRunning(false);
+        dlg.setRunning(false);
         CHECK_UI(algos[0]->isEnabled() && algos[1]->isEnabled(), "结束后解锁");
     }
 

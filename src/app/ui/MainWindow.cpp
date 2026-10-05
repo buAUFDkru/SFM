@@ -14,6 +14,7 @@
 #include "DenseReconstructionDialog.h"
 #include "LogWidget/LogConsole.h"
 #include "NewProjectDialog.h"
+#include "SparseReconstructionDialog.h"
 #include "ViewWidget/PointCloudWidget.h"
 
 #include <QAction>
@@ -23,6 +24,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -30,6 +32,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QThread>
+#include <QToolButton>
 
 #include <opencv2/core.hpp>
 
@@ -91,6 +94,7 @@ void MainWindow::setProjectForTest(const QString &dir, const QStringList &files)
                                      tr("%1 张图像").arg(files.size()));
     m_configPanel->setProjectLoaded(true);
     m_configPanel->setImageFiles(files);
+    m_sparseDialog->setStartEnabled(true);
     markDirty();
 }
 
@@ -163,6 +167,10 @@ void MainWindow::setupMenuBar()
 
     // ── 重建 ──
     QMenu *reconstructMenu = menuBar()->addMenu(tr("重建(&R)"));
+    QAction *sparse = reconstructMenu->addAction(tr("稀疏重建(&S)..."));
+    sparse->setShortcut(QKeySequence("Ctrl+R"));
+    connect(sparse, &QAction::triggered, this, &MainWindow::onShowSparseReconstruction);
+
     QAction *dense = reconstructMenu->addAction(tr("密集重建(&D)..."));
     connect(dense, &QAction::triggered, this, &MainWindow::onDenseReconstruction);
 
@@ -211,10 +219,7 @@ void MainWindow::setupMenuBar()
 void MainWindow::setupStatusBar()
 {
     m_statusLabel = new QLabel(tr("就绪"), this);
-    m_threadLabel = new QLabel(tr("线程: 0"), this);
-
     statusBar()->addWidget(m_statusLabel, 1);
-    statusBar()->addPermanentWidget(m_threadLabel);
 }
 
 void MainWindow::setupCentralWidget()
@@ -240,16 +245,38 @@ void MainWindow::setupCentralWidget()
     m_splitter->setStretchFactor(2, 0);
     m_splitter->setSizes({380, 920, 300});
 
-    setCentralWidget(m_splitter);
+    // 稀疏重建对话框（非模态，经菜单"重建 → 稀疏重建"打开）
+    m_sparseDialog = new SparseReconstructionDialog(m_registry, this);
+
+    // 最右侧日志收展按钮：点击隐藏/显示日志面板
+    m_logToggle = new QToolButton(this);
+    m_logToggle->setArrowType(Qt::RightArrow);
+    m_logToggle->setToolTip(tr("隐藏日志"));
+    m_logToggle->setFixedWidth(18);
+    m_logToggle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+    m_logToggle->setAutoRaise(true);
+    connect(m_logToggle, &QToolButton::clicked,
+            this, &MainWindow::onToggleLogPanel);
+
+    auto *central = new QWidget(this);
+    auto *centralLayout = new QHBoxLayout(central);
+    centralLayout->setContentsMargins(0, 0, 0, 0);
+    centralLayout->setSpacing(0);
+    centralLayout->addWidget(m_splitter, 1);
+    centralLayout->addWidget(m_logToggle);
+    setCentralWidget(central);
+
     resize(1260, 760);
 }
 
 void MainWindow::connectSignals()
 {
-    connect(m_configPanel, &ConfigPanel::startRequested,
+    connect(m_sparseDialog, &SparseReconstructionDialog::startRequested,
             this, &MainWindow::onStartReconstruction);
-    connect(m_configPanel, &ConfigPanel::stopRequested,
+    connect(m_sparseDialog, &SparseReconstructionDialog::stopRequested,
             this, &MainWindow::onStopReconstruction);
+    connect(m_sparseDialog, &SparseReconstructionDialog::configChanged,
+            this, &MainWindow::markDirty);
     connect(m_configPanel, &ConfigPanel::configChanged,
             this, &MainWindow::markDirty);
     connect(m_configPanel, &ConfigPanel::denseReconstructionRequested,
@@ -305,6 +332,7 @@ void MainWindow::onCreateProject()
                                      tr("%1 张图像").arg(dlg.imageFiles().size()));
     m_configPanel->setProjectLoaded(true);
     m_configPanel->resetResults();
+    m_sparseDialog->setStartEnabled(true);
 
     markDirty();
     m_logConsole->appendInfo(tr("[项目] 已创建: %1（%2 张图像）")
@@ -351,18 +379,18 @@ bool MainWindow::openProject(const QString &manifestPath)
     // 恢复 UI：先恢复固定内参，再设置图像列表（其内自动检测会被固定内参覆盖保护）
     const ReconstructionConfig &cfg = m_pipeline->config();
     m_configPanel->setFixedCameraMatrix(cfg.cameraMatrix, cfg.fixCameraMatrix);
-    m_configPanel->setAlgorithms(m.descriptorType, m.descriptorParams,
-                                 m.matcherType, m.matcherParams);
+    m_sparseDialog->setAlgorithms(m.descriptorType, m.descriptorParams,
+                                  m.matcherType, m.matcherParams);
     m_configPanel->setImageFiles(m.imageFiles);
     m_configPanel->setProjectSummary(m_projectName,
                                      tr("%1 张图像").arg(m.imageFiles.size()));
     m_configPanel->setProjectLoaded(true);
+    m_sparseDialog->setStartEnabled(true);
 
-    // 回填结果区（清单统计 + 已保存的密集点云）
-    m_configPanel->setSparseResult(m.totalPoints);
+    // 回填结果区（已保存的密集点云 → 隐藏密集按钮）
+    m_configPanel->setSparseResult();
     if (m_pipeline->lastOutput().denseCloud && !m_pipeline->lastOutput().denseCloud->empty())
-        m_configPanel->setDenseResult(
-            static_cast<int>(m_pipeline->lastOutput().denseCloud->size()));
+        m_configPanel->setDenseResult();
 
     // 图像缺失检查：影响完整重建，不影响查看与密集续算
     QStringList missing;
@@ -501,9 +529,26 @@ void MainWindow::applyConfigToPipeline()
     if (!m_pipeline)
         return;
     ReconstructionConfig cfg = m_configPanel->gatherConfig();
+    m_sparseDialog->gatherAlgorithms(cfg.descriptorType, cfg.descriptorParams,
+                                     cfg.matcherType, cfg.matcherParams);
     cfg.projectPath = m_projectDir;
     cfg.projectName = m_projectName;
     m_pipeline->setConfig(cfg);
+}
+
+void MainWindow::onShowSparseReconstruction()
+{
+    m_sparseDialog->show();
+    m_sparseDialog->raise();
+    m_sparseDialog->activateWindow();
+}
+
+void MainWindow::onToggleLogPanel()
+{
+    const bool showing = m_logConsole->isVisible();
+    m_logConsole->setVisible(!showing);
+    m_logToggle->setArrowType(showing ? Qt::LeftArrow : Qt::RightArrow);
+    m_logToggle->setToolTip(showing ? tr("显示日志") : tr("隐藏日志"));
 }
 
 void MainWindow::onStartReconstruction()
@@ -549,8 +594,7 @@ void MainWindow::onStartReconstruction()
             this, &MainWindow::onPipelineFinished);
 
     m_statusLabel->setText(tr("重建中..."));
-    m_threadLabel->setText(tr("线程: 1"));
-    m_configPanel->setRunning(true);
+    m_sparseDialog->setRunning(true);
     m_pipelineRunner->start();
 }
 
@@ -558,7 +602,7 @@ void MainWindow::onStopReconstruction()
 {
     if (m_pipelineRunner)
         m_pipelineRunner->stop();
-    m_configPanel->setRunning(false);
+    m_sparseDialog->setRunning(false);
     m_statusLabel->setText(tr("已停止"));
 }
 
@@ -589,7 +633,7 @@ void MainWindow::onDenseReconstruction()
     }
 
     m_statusLabel->setText(tr("密集重建: %1").arg(config.denseReconstructionMethod));
-    m_configPanel->setRunning(true);
+    m_sparseDialog->setRunning(true);
     m_pipelineRunner->startDenseReconstruction();
 }
 
@@ -640,19 +684,18 @@ void MainWindow::onPipelineLogBatch(const QStringList &messages)
 
 void MainWindow::onPipelineFinished(bool success)
 {
-    m_threadLabel->setText(tr("线程: 0"));
     m_statusLabel->setText(success ? tr("重建完成") : tr("重建失败"));
-    m_configPanel->setRunning(false);
+    m_sparseDialog->setRunning(false);
     if (!success)
         return;
 
     loadAndDisplayCloudFromOutput();
 
-    // 密集点云就绪则追加结果行（稀疏行已由阶段信号设置）
+    // 密集点云就绪则隐藏密集重建按钮（重跑走菜单）
     const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &dense =
         m_pipeline ? m_pipeline->lastOutput().denseCloud : nullptr;
     if (dense && !dense->empty())
-        m_configPanel->setDenseResult(static_cast<int>(dense->size()));
+        m_configPanel->setDenseResult();
 
     // 自动保存项目结果（点云 + 相机参数 + 匹配对 + 清单）
     if (!m_projectDir.isEmpty() && m_pipeline) {
@@ -679,9 +722,9 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
     // 阶段点云就绪即同步相机位姿金字塔（稀疏完成时 lastOutput 已含位姿）
     updateCameraFrustaFromOutput();
 
-    // 稀疏完成：显示结果区并折叠任务区（密集继续在后台进行）
+    // 稀疏完成：显示结果区（密集重建入口；密集继续在后台进行）
     if (stageName == QStringLiteral("sparse") && m_pipeline)
-        m_configPanel->setSparseResult(m_pipeline->lastOutput().totalPoints);
+        m_configPanel->setSparseResult();
 }
 
 void MainWindow::updateStatusLabel()

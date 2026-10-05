@@ -22,6 +22,7 @@ HEADERS += \
     ui/ControlButtons.h \
     ui/DenseReconstructionDialog.h \
     ui/NewProjectDialog.h \
+    ui/SparseReconstructionDialog.h \
     ui/LogWidget/LogConsole.h \
     ui/ParamWidget/ParamFormGenerator.h \
     ui/ParamWidget/AlgorithmComboPanel.h \
@@ -34,6 +35,7 @@ SOURCES += \
     ui/ControlButtons.cpp \
     ui/DenseReconstructionDialog.cpp \
     ui/NewProjectDialog.cpp \
+    ui/SparseReconstructionDialog.cpp \
     ui/LogWidget/LogConsole.cpp \
     ui/ParamWidget/ParamFormGenerator.cpp \
     ui/ParamWidget/AlgorithmComboPanel.cpp \
