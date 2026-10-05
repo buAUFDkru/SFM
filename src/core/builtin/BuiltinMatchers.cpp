@@ -144,7 +144,7 @@ FlannMatcherWorker::FlannMatcherWorker(const QJsonObject &params)
     if (params.contains(QStringLiteral("trees")))
         m_trees = params.value(QStringLiteral("trees")).toInt(4);
     if (params.contains(QStringLiteral("checks")))
-        m_checks = params.value(QStringLiteral("checks")).toInt(50);
+        m_checks = params.value(QStringLiteral("checks")).toInt(32);
 }
 
 bool FlannMatcherWorker::knnMatchPair(const cv::Mat &desc1, const cv::Mat &desc2,
@@ -191,11 +191,11 @@ QList<ParamSchema> FlannMatcherPlugin::paramSchema() const
     ParamSchema checks;
     checks.name = QStringLiteral("checks");
     checks.type = ParamSchema::Type::Int;
-    checks.defaultValue = 50;
+    checks.defaultValue = 32;
     checks.min = 1;
     checks.max = 200;
     checks.group = QStringLiteral("FLANN");
-    checks.tooltip = QStringLiteral("搜索时回溯节点次数(预留，当前实现未使用)");
+    checks.tooltip = QStringLiteral("搜索时回溯节点次数；越小越快，太大仅换来边际精度");
 
     return { trees, checks };
 }

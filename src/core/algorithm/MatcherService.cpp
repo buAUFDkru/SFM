@@ -427,13 +427,18 @@ bool MatcherService::matchFeatures(const std::vector<FeatureResult> &features,
     // 3. 候选对生成
     //    sequential：每张图像与其后 sequenceWindow 张图匹配（历史行为，窗口现可配）
     //    exhaustive：所有图像两两匹配
-    //    auto：小规模数据集（≤ exhaustiveMaxImages）自动走穷举
+    //    auto：小规模数据集（≤ exhaustiveMaxImages，默认 20）自动走穷举，
+    //          更大规模走序列窗口 + 传递性匹配。
+    //    界限依据：穷举 ≈1.2 s/对（14 图 91 对 27 s，28 图 378 对 107 s），
+    //    20 图 190 对 ≈ 55 s 是「全连接收益仍明显、耗时可接受」的平衡点；
+    //    超过 20 图后 O(N²) 对数膨胀且边际增益递减，窗口 10 + 传递性匹配
+    //    足以恢复非相邻重叠（COLMAP sequential_overlap 同为 10）。
     const QString matchingMode =
         params.value(QStringLiteral("matchingMode")).toString(QStringLiteral("auto")).toLower();
     const int sequenceWindow =
         params.value(QStringLiteral("sequenceWindow")).toInt(10);
     const int exhaustiveMaxImages =
-        params.value(QStringLiteral("exhaustiveMaxImages")).toInt(50);
+        params.value(QStringLiteral("exhaustiveMaxImages")).toInt(20);
     const bool useExhaustive =
         (matchingMode == QStringLiteral("exhaustive")) ||
         (matchingMode == QStringLiteral("auto") && N <= exhaustiveMaxImages);

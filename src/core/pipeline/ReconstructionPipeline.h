@@ -54,11 +54,12 @@ struct ReconstructionConfig
         {"guidedRatio", 0.9},
         {"guidedBelowInliers", 500},
         {"adaptiveEdgeThreshold", true},
-        // 匹配模式：auto 表示小规模数据集（≤ exhaustiveMaxImages）自动走穷举，
-        // 避免序列窗口漏掉真实重叠对
+        // 匹配模式：auto 表示小规模数据集（≤ exhaustiveMaxImages，默认 20）
+        // 自动走穷举，避免序列窗口漏掉真实重叠对；更大规模走序列窗口 +
+        // 传递性匹配（穷举 O(N²) 对数在 20 图以上膨胀过快，边际增益递减）
         {"matchingMode", "auto"},
         {"sequenceWindow", 10},
-        {"exhaustiveMaxImages", 50},
+        {"exhaustiveMaxImages", 20},
     };
 
     int threadCount = 0;  ///< 线程池线程数；0 表示使用物理核心数近似值

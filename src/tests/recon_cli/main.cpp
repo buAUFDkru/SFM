@@ -173,7 +173,7 @@ int main(int argc, char *argv[])
                               {"adaptiveEdgeThreshold", true},
                               {"matchingMode", matchingMode},
                               {"sequenceWindow", 10},
-                              {"exhaustiveMaxImages", 50}};
+                              {"exhaustiveMaxImages", 20}};
 
     // ── 可选阈值覆盖（调试用）：initMinTriAngle / minTriAngle / ignoreTwoView ──
     {
