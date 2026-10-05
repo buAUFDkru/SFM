@@ -82,18 +82,23 @@ struct LocalReprojectionError
 /**
  * 自标定重投影误差代价函数（无畸变）
  *
- * 内参 K = [fx, fy, cx, cy]，共4个参数（阶段五 5.3 起 fx/fy 分开存储；
- * 关闭 refineFocalPerAxis 时用 SubsetManifold 把 fy 固定，等价于旧的
- * 「单一焦距 fx=fy」行为）。
+ * 内参 K = [fx, fy, cx, cy]，共4个参数（阶段五 5.3 起 fx/fy 分开存储）。
+ *
+ * singleFocal（refineFocalPerAxis=false）时 y 方向也用 K[0]：
+ * 这才是与旧版 K=[f,cx,cy] 等价的「单一焦距」。**不能**用 SubsetManifold
+ * 把 K[1] 钉在初值来模拟 —— 那样 y 方向的焦距误差永远无法被内参吸收，
+ * 只能污染位姿和点云。实测 test14（estimateK 初值 944 偏真值 ~2.5%）：
+ * 钉 K[1] 时重投影中位 0.21→0.58px，y 用 K[0] 后恢复 0.21px。
  *
  * 投影模型：
  *   predicted_x = fx * xp + cx
- *   predicted_y = fy * yp + cy
+ *   predicted_y = (singleFocal ? fx : fy) * yp + cy
  */
 struct SelfCalibReprojectionError
 {
-    explicit SelfCalibReprojectionError(double obsX, double obsY)
-        : m_obsX(obsX), m_obsY(obsY) {}
+    explicit SelfCalibReprojectionError(double obsX, double obsY,
+                                        bool singleFocal = true)
+        : m_obsX(obsX), m_obsY(obsY), m_singleFocal(singleFocal) {}
 
     template <typename T>
     bool operator()(const T *const camera,
@@ -111,22 +116,25 @@ struct SelfCalibReprojectionError
         T yp = p[1] / p[2];
 
         // K = [fx, fy, cx, cy]
+        const T fy = m_singleFocal ? K[0] : K[1];
         T predicted_x = K[0] * xp + K[2];
-        T predicted_y = K[1] * yp + K[3];
+        T predicted_y = fy * yp + K[3];
 
         residuals[0] = predicted_x - T(m_obsX);
         residuals[1] = predicted_y - T(m_obsY);
         return true;
     }
 
-    static ceres::CostFunction *Create(const cv::Point2d &obs)
+    static ceres::CostFunction *Create(const cv::Point2d &obs,
+                                       bool singleFocal = true)
     {
         // 残差维度2，参数块维度：camera(6), point(3), K(4)
         return new ceres::AutoDiffCostFunction<SelfCalibReprojectionError, 2, 6, 3, 4>(
-            new SelfCalibReprojectionError(obs.x, obs.y));
+            new SelfCalibReprojectionError(obs.x, obs.y, singleFocal));
     }
 
     double m_obsX, m_obsY;
+    bool m_singleFocal;
 };
 
 // ─── 全局BA用重投影误差（含径向/切向畸变，阶段五 5.2） ─────────────────────
@@ -148,8 +156,9 @@ struct SelfCalibReprojectionError
  */
 struct SelfCalibDistReprojectionError
 {
-    explicit SelfCalibDistReprojectionError(double obsX, double obsY)
-        : m_obsX(obsX), m_obsY(obsY) {}
+    explicit SelfCalibDistReprojectionError(double obsX, double obsY,
+                                            bool singleFocal = true)
+        : m_obsX(obsX), m_obsY(obsY), m_singleFocal(singleFocal) {}
 
     template <typename T>
     bool operator()(const T *const camera,
@@ -176,20 +185,23 @@ struct SelfCalibDistReprojectionError
         const T yd = yp * radial + D[2] * (r2 + T(2.0) * yp * yp) +
                      T(2.0) * D[3] * xp * yp;
 
+        const T fy = m_singleFocal ? K[0] : K[1];
         residuals[0] = K[0] * xd + K[2] - T(m_obsX);
-        residuals[1] = K[1] * yd + K[3] - T(m_obsY);
+        residuals[1] = fy * yd + K[3] - T(m_obsY);
         return true;
     }
 
-    static ceres::CostFunction *Create(const cv::Point2d &obs)
+    static ceres::CostFunction *Create(const cv::Point2d &obs,
+                                       bool singleFocal = true)
     {
         // 残差维度2，参数块维度：camera(6), point(3), K(4), D(4)
         return new ceres::AutoDiffCostFunction<SelfCalibDistReprojectionError,
                                                2, 6, 3, 4, 4>(
-            new SelfCalibDistReprojectionError(obs.x, obs.y));
+            new SelfCalibDistReprojectionError(obs.x, obs.y, singleFocal));
     }
 
     double m_obsX, m_obsY;
+    bool m_singleFocal;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -309,8 +321,10 @@ bool BundleAdjustment::globalBundleAdjustment(
 
     ceres::Problem problem;
 
-    // 阶段五 5.3：内参 K = [fx, fy, cx, cy]（4 个槽位），
-    // 关闭 refineFocalPerAxis 时用流形把 fy 钉住，行为与旧的 [f,cx,cy] 一致。
+    // 阶段五 5.3：内参 K = [fx, fy, cx, cy]（4 个槽位）。
+    // 关闭 refineFocalPerAxis 时 cost 函数里 y 方向直接用 K[0]（真正的
+    // 单一焦距 fx=fy，与旧版 K=[f,cx,cy] 数值等价）；K[1] 不出现在残差中
+    // （梯度恒 0），仍用流形钉住以明确语义。
     const bool refinePerAxis  = (intr != nullptr && intr->refineFocalPerAxis);
     const bool refineDist     = (intr != nullptr && intr->refineDistortion);
     /// 相机数不足时连焦距一起钉死（调用方通过 canRefineIntrinsics 控制）
@@ -415,11 +429,12 @@ bool BundleAdjustment::globalBundleAdjustment(
 
             if (refineDist) {
                 problem.AddResidualBlock(
-                    SelfCalibDistReprojectionError::Create(pt), loss,
+                    SelfCalibDistReprojectionError::Create(pt, !refinePerAxis),
+                    loss,
                     cameras[camIdx].data(), points3d[ptIdx].data(), K, dBlock);
             } else {
                 problem.AddResidualBlock(
-                    SelfCalibReprojectionError::Create(pt), loss,
+                    SelfCalibReprojectionError::Create(pt, !refinePerAxis), loss,
                     cameras[camIdx].data(), points3d[ptIdx].data(), K);
             }
         }
