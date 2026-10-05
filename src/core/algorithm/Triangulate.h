@@ -359,8 +359,15 @@ private:
      *
      * 优化「新注册相机 + 共享观测最多的 Top-N 邻域相机」的位姿，
      * 以及本轮被新建/修改的三维点。
+     *
+     * @param fullFilter 是否对局部图像集合做全量外点过滤
+     *        （filterPoints3DInImages）。该过滤把局部图上的**所有**观测
+     *        重算一遍重投影，成本 O(局部图观测数)；只有位姿被明显移动的
+     *        轮次才需要。迭代精化的后续轮次 BA 仅微调（实测 3 次迭代），
+     *        传 false 可跳过，只保留可变点的增量过滤。
      */
-    void adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds);
+    void adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds,
+                           bool fullFilter = true);
 
     /**
      * @brief 找出与新注册图像共享三维点最多的邻域图像（COLMAP FindLocalBundle）

@@ -472,7 +472,9 @@ void Triangulate::iterativeLocalRefinement(int imageId)
                                         m_triangulator->modifiedPoints().end());
         if (variablePoints.empty()) break;
 
-        adjustLocalBundle(imageId, variablePoints);
+        // 第一轮位姿/点被明显移动，做全量过滤；后续轮 BA 仅微调，
+        // 跳过全量过滤（只保留可变点的增量过滤），省 ~40% 过滤耗时
+        adjustLocalBundle(imageId, variablePoints, iter == 0);
         if (m_lastLocalResiduals == 0) break;
 
         // 变化率 = (合并 + 补全 + 过滤) / 参与优化的残差数
@@ -589,7 +591,8 @@ void Triangulate::applyPointParams(const std::vector<std::array<double, 3>> &poi
     }
 }
 
-void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds)
+void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variablePointIds,
+                                    bool fullFilter)
 {
     m_lastLocalChanged = 0;
     m_lastLocalResiduals = 0;
@@ -678,9 +681,15 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
     const size_t filtered = m_obs->filterPoints3D(
         m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
         variablePointIds, *m_poses, m_K, m_dist);
-    const size_t filteredImg = m_obs->filterPoints3DInImages(
-        m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
-        localImages, *m_poses, m_K, m_dist);
+    // 全量过滤（局部图上所有观测重算重投影）只在位姿被明显移动的轮次做：
+    // 迭代精化的后续轮次 BA 仅 3 次迭代、位姿微调，重复全量过滤是纯浪费
+    // （data 实测过滤占总局部精化 ~40%）。收尾的 filterAllPoints3D 兜底。
+    size_t filteredImg = 0;
+    if (fullFilter) {
+        filteredImg = m_obs->filterPoints3DInImages(
+            m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
+            localImages, *m_poses, m_K, m_dist);
+    }
     m_timing.filter +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tF0).count();
 

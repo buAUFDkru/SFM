@@ -565,12 +565,16 @@ std::vector<InitResult> Initialization::findInitialPairCandidates(
         double medAngle = median(angles);
 
         // ── 角度权重函数 ──
-        // 峰值在5°-10°，0°和>20°时权重为0
+        // 峰值在7°-10°，0°和>20°时权重衰减
+        // 增长段 3°→0、7°→1：原 1°→0、5°→1 时 3~4° 的弱角度对仍有 ~0.5
+        // 权重，乘上大内点数常登顶（data #27 系，实测种子角中位 2.9° →
+        // 重建三角化角中位 4.2°、点数腰斩）。右移后 3.9° 权重只剩 0.22，
+        // 与 #11 系（12.7~13.6°，权重 ~0.87）拉开 4 倍差距。
         double angleWeight = 0.0;
-        if (medAngle >= 1.0 && medAngle < 5.0) {
-            // 线性增长：1°→0, 5°→1
-            angleWeight = (medAngle - 1.0) / 4.0;
-        } else if (medAngle >= 5.0 && medAngle <= 10.0) {
+        if (medAngle >= 3.0 && medAngle < 7.0) {
+            // 线性增长：3°→0, 7°→1
+            angleWeight = (medAngle - 3.0) / 4.0;
+        } else if (medAngle >= 7.0 && medAngle <= 10.0) {
             // 最优区间：权重=1
             angleWeight = 1.0;
         } else if (medAngle > 10.0 && medAngle <= 20.0) {
