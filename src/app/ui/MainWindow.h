@@ -126,6 +126,7 @@ private:
     LogConsole *m_logConsole = nullptr;
     SparseReconstructionDialog *m_sparseDialog = nullptr;
     QToolButton *m_logToggle = nullptr;
+    int m_logWidth = 300;       ///< 日志面板隐藏前的宽度（恢复显示时还原）
     QLabel *m_statusLabel = nullptr;
     QMenu *m_recentMenu = nullptr;
     QAction *m_frustaAction = nullptr;  ///< 视图菜单"显示相机位姿"（与面板复选框同步）

@@ -250,13 +250,19 @@ void MainWindow::setupCentralWidget()
 
     // 最右侧日志收展按钮：竖向高亮条，点击隐藏/显示日志面板
     m_logToggle = new QToolButton(this);
-    m_logToggle->setArrowType(Qt::RightArrow);
+    m_logToggle->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    QFont toggleFont = m_logToggle->font();
+    toggleFont.setPointSize(11);
+    toggleFont.setBold(true);
+    m_logToggle->setFont(toggleFont);
+    m_logToggle->setText(tr("▶"));   // 日志显示中：点击向右收起
     m_logToggle->setToolTip(tr("隐藏日志"));
-    m_logToggle->setFixedWidth(22);
+    m_logToggle->setFixedWidth(26);
     m_logToggle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
     m_logToggle->setStyleSheet(
         QStringLiteral(
-            "QToolButton { background: #3d4450; border: none; border-left: 1px solid #5a626e; }"
+            "QToolButton { background: #3d4450; border: none; border-left: 1px solid #5a626e;"
+            "  color: #e0e0e0; padding: 0; }"
             "QToolButton:hover { background: #4a90d9; }"
             "QToolButton:pressed { background: #3a7bbf; }"));
     connect(m_logToggle, &QToolButton::clicked,
@@ -542,9 +548,28 @@ void MainWindow::onShowSparseReconstruction()
 void MainWindow::onToggleLogPanel()
 {
     const bool showing = m_logConsole->isVisible();
-    m_logConsole->setVisible(!showing);
-    m_logToggle->setArrowType(showing ? Qt::LeftArrow : Qt::RightArrow);
-    m_logToggle->setToolTip(showing ? tr("显示日志") : tr("隐藏日志"));
+    const QList<int> sizes = m_splitter->sizes();
+    const int panel = sizes.value(0, 380);   // 左侧面板宽度保持不变
+
+    if (showing) {
+        // 收起：日志宽度全部让给中间视图
+        if (sizes.size() == 3 && sizes[2] > 0)
+            m_logWidth = sizes[2];
+        m_logConsole->hide();
+        m_splitter->setSizes({panel, sizes.value(1) + m_logWidth});
+        m_logToggle->setText(tr("◀"));
+        m_logToggle->setToolTip(tr("显示日志"));
+    } else {
+        // 展开：恢复日志宽度，中间视图让出相应空间
+        const int logW = m_logWidth > 0 ? m_logWidth : 300;
+        m_logConsole->show();
+        m_splitter->setSizes({panel,
+                              qMax(m_pointCloudWidget->minimumWidth(),
+                                   sizes.value(1, 600) - logW),
+                              logW});
+        m_logToggle->setText(tr("▶"));
+        m_logToggle->setToolTip(tr("隐藏日志"));
+    }
 }
 
 void MainWindow::onStartReconstruction()
