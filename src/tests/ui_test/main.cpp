@@ -30,6 +30,7 @@
 #include "plugin/ParamSchema.h"
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
+#include "data/SfmTypes.h"
 #include "pipeline/ReconstructionPipeline.h"
 #include "pipeline/ProjectStore.h"
 #include "ParamWidget/ParamFormGenerator.h"
@@ -116,16 +117,17 @@ static int g_fail = 0;
 /// 渲染带纹理球体多视图（确定性种子），返回 6 张图
 bool renderSphereViews(QTemporaryDir &dir, QStringList &outFiles)
 {
-    const int W = 320, H = 240;
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 458.4, 0, W / 2.0,
-                                        0, 458.4, H / 2.0,
-                                        0, 0, 1);
+    // 与 plugin_test 的已验证夹具对齐（640×480 + estimateK 与管线自动估算一致）：
+    // 球体投影完整可见、特征可跨视图重复，保证稀疏流程（轨迹链式构建 +
+    // 增量注册）能在此合成数据上完成端到端重建
+    const int W = 640, H = 480;
+    cv::Mat K = estimateK(W, H);
 
-    cv::Mat tex(256, 256, CV_8UC3);
+    cv::Mat tex(512, 512, CV_8UC3);
     {
         cv::RNG trng(777);
         trng.fill(tex, cv::RNG::UNIFORM, 0, 255);
-        cv::Mat coarse(32, 32, CV_8UC3);
+        cv::Mat coarse(64, 64, CV_8UC3);
         cv::RNG crng(12345);
         crng.fill(coarse, cv::RNG::UNIFORM, 0, 255);
         cv::Mat coarseBig;
