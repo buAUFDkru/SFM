@@ -633,11 +633,23 @@ StereoPairResult StereoSGBMReconstructor::processPair(
 
         rectPts1.resize(rectPts1Mat.rows);
         rectPts2.resize(rectPts2Mat.rows);
+        // cv::undistortPoints 输出与输入同深度：输入 CV_64FC2 时输出也是
+        // CV_64FC2。必须按实际深度读取——用 Vec2f 读 double 数据会把每个
+        // double 的位模式拆成两个 float，坐标全部变成垃圾（历史 bug：稀疏
+        // 对应缺失时本段不执行，问题被掩盖）。
+        const bool out64 = rectPts1Mat.depth() == CV_64F;
         for (int i = 0; i < rectPts1Mat.rows; ++i) {
-            rectPts1[i] = cv::Point2d(rectPts1Mat.at<cv::Vec2f>(i, 0)[0],
-                                       rectPts1Mat.at<cv::Vec2f>(i, 0)[1]);
-            rectPts2[i] = cv::Point2d(rectPts2Mat.at<cv::Vec2f>(i, 0)[0],
-                                       rectPts2Mat.at<cv::Vec2f>(i, 0)[1]);
+            if (out64) {
+                const cv::Vec2d p1 = rectPts1Mat.at<cv::Vec2d>(i, 0);
+                const cv::Vec2d p2 = rectPts2Mat.at<cv::Vec2d>(i, 0);
+                rectPts1[i] = cv::Point2d(p1[0], p1[1]);
+                rectPts2[i] = cv::Point2d(p2[0], p2[1]);
+            } else {
+                const cv::Vec2f p1 = rectPts1Mat.at<cv::Vec2f>(i, 0);
+                const cv::Vec2f p2 = rectPts2Mat.at<cv::Vec2f>(i, 0);
+                rectPts1[i] = cv::Point2d(p1[0], p1[1]);
+                rectPts2[i] = cv::Point2d(p2[0], p2[1]);
+            }
         }
     }
 
@@ -676,15 +688,20 @@ void StereoSGBMReconstructor::estimateDisparityRange(
 
     double maxD = -1e9, minD = 1e9;
     int validCount = 0;
+    int negativeCount = 0;
     for (size_t i = 0; i < points1.size(); ++i) {
         double d = points1[i].x - points2[i].x;
         if (!std::isfinite(d) || d < -5000.0 || d > 5000.0) continue;
+        if (d < 0.0) ++negativeCount;
         if (d > maxD) maxD = d;
         if (d < minD) minD = d;
         validCount++;
     }
 
     if (validCount < 3) {
+        log(QString("[视差范围] 稀疏对应不足 (%1/%2)，回退默认 min=%3 num=%4")
+                .arg(validCount).arg(points1.size())
+                .arg(m_config.minDisparity).arg(m_config.numDisparities));
         minDisp = m_config.minDisparity;
         numDisp = m_config.numDisparities;
         return;
@@ -700,7 +717,17 @@ void StereoSGBMReconstructor::estimateDisparityRange(
     if (numDisp <= 0) numDisp = 16;
 
     int maxNumDisp = ((m_config.numDisparities * 3 + 15) / 16) * 16;
-    if (numDisp > maxNumDisp) {
+    const bool capped = numDisp > maxNumDisp;
+    if (capped) {
         numDisp = maxNumDisp;
     }
+
+    // 诊断：校正后真实视差恒为正（右相机位于 +x），负值/极值说明稀疏
+    // 对应中混有错匹配；范围被上限截断时真实视差可能落在搜索范围外
+    log(QString("[视差范围] 校正后对应=%1/%2, 原始视差 min=%3 max=%4 (负=%5)"
+                ", 估计 num=%6%7 上限=%8")
+            .arg(validCount).arg(points1.size())
+            .arg(minD, 0, 'f', 1).arg(maxD, 0, 'f', 1).arg(negativeCount)
+            .arg(numDisp).arg(capped ? QStringLiteral(" (被上限截断!)") : QStringLiteral())
+            .arg(maxNumDisp));
 }
