@@ -12,7 +12,9 @@
 
 #include <QImageReader>
 #include <QMouseEvent>
+#include <QOpenGLContext>
 #include <QOpenGLTexture>
+#include <QSurfaceFormat>
 #include <QThreadPool>
 #include <QWheelEvent>
 #include <algorithm>
@@ -20,6 +22,9 @@
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
+constexpr int kInteractivePointBudget = 750000;
+constexpr int kWheelIdleMs = 120;
+constexpr GLenum kGlMaxVertexAttribStride = 0x82E5;
 /// 缩略图最长边像素（纹理上限，控制显存与加载耗时）
 constexpr int kThumbMaxSize = 256;
 } // namespace
@@ -29,6 +34,13 @@ PointCloudWidget::PointCloudWidget(QWidget *parent)
     , m_backgroundColor(Qt::black)
 {
     setFocusPolicy(Qt::StrongFocus);
+    m_thumbnailThreadPool.setMaxThreadCount(2);
+    m_wheelIdleTimer.setSingleShot(true);
+    m_wheelIdleTimer.setInterval(kWheelIdleMs);
+    connect(&m_wheelIdleTimer, &QTimer::timeout, this, [this]() {
+        m_wheelInteracting = false;
+        update();
+    });
     connect(this, &PointCloudWidget::frustaThumbnailReady,
             this, &PointCloudWidget::onFrustaThumbnailReady);
     resetView();
@@ -36,6 +48,15 @@ PointCloudWidget::PointCloudWidget(QWidget *parent)
 
 PointCloudWidget::~PointCloudWidget()
 {
+    ++m_frustaGeneration;
+    m_thumbnailThreadPool.clear();
+    m_thumbnailThreadPool.waitForDone();
+
+    if (!m_glInitialized) {
+        qDeleteAll(m_frustaTextures);
+        return;
+    }
+
     makeCurrent();
     if (m_vao)
         glDeleteVertexArrays(1, &m_vao);
@@ -49,8 +70,7 @@ PointCloudWidget::~PointCloudWidget()
         glDeleteVertexArrays(1, &m_quadVao);
     if (m_quadVbo)
         glDeleteBuffers(1, &m_quadVbo);
-    for (QOpenGLTexture *tex : m_frustaTextures)
-        delete tex;
+    qDeleteAll(m_frustaTextures);
     if (m_shaderProgram)
         glDeleteProgram(m_shaderProgram);
     if (m_quadShaderProgram)
@@ -119,6 +139,23 @@ void PointCloudWidget::setBackgroundColor(const QColor &color)
 void PointCloudWidget::initializeGL()
 {
     initializeOpenGLFunctions();
+    m_glInitialized = true;
+
+    const QOpenGLContext *glContext = QOpenGLContext::currentContext();
+    if (glContext) {
+        const QSurfaceFormat format = glContext->format();
+        const bool supportsStrideLimit = format.majorVersion() > 4
+                                         || (format.majorVersion() == 4
+                                             && format.minorVersion() >= 4)
+                                         || glContext->hasExtension(
+                                             QByteArrayLiteral("GL_ARB_vertex_attrib_binding"));
+        if (supportsStrideLimit) {
+            GLint maxStride = 0;
+            glGetIntegerv(kGlMaxVertexAttribStride, &maxStride);
+            if (maxStride > 0)
+                m_maxVertexAttribStride = maxStride;
+        }
+    }
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_PROGRAM_POINT_SIZE);
@@ -152,6 +189,9 @@ void PointCloudWidget::initializeGL()
         qWarning("[PointCloudWidget] 点云着色器初始化失败");
         return;
     }
+    m_mvpLocation = glGetUniformLocation(m_shaderProgram, "mvp");
+    m_pointSizeLocation = glGetUniformLocation(m_shaderProgram, "pointSize");
+    m_monoColorLocation = glGetUniformLocation(m_shaderProgram, "monoColor");
 
     // 缩略图四边形着色器（独立 program，attribute 1 为 UV 而非颜色）
     m_quadShaderProgram = createProgram(
@@ -177,8 +217,12 @@ void PointCloudWidget::initializeGL()
             FragColor = texture(frustaTex, vUV);
         }
         )");
-    if (!m_quadShaderProgram)
+    if (!m_quadShaderProgram) {
         qWarning("[PointCloudWidget] 缩略图着色器初始化失败（仅影响缩略图显示）");
+    } else {
+        m_quadMvpLocation = glGetUniformLocation(m_quadShaderProgram, "mvp");
+        m_frustaTexLocation = glGetUniformLocation(m_quadShaderProgram, "frustaTex");
+    }
 
     glGenVertexArrays(1, &m_vao);
     glGenBuffers(1, &m_vbo);
@@ -247,14 +291,14 @@ void PointCloudWidget::resizeGL(int w, int h)
 {
     if (h == 0) h = 1;
     glViewport(0, 0, w, h);
-
-    m_projection.setToIdentity();
-    m_projection.perspective(m_fov, float(w) / float(h), 0.1f, 100000.0f);
+    updateProjectionMatrix();
 }
 
 void PointCloudWidget::paintGL()
 {
-    QColor c = m_backgroundColor;
+    uploadDirtyBuffers();
+
+    const QColor c = m_backgroundColor;
     glClearColor(c.redF(), c.greenF(), c.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -263,27 +307,25 @@ void PointCloudWidget::paintGL()
 
     glUseProgram(m_shaderProgram);
 
-    QMatrix4x4 mvp = m_projection * m_modelView;
-    GLint mvpLoc = glGetUniformLocation(m_shaderProgram, "mvp");
-    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.constData());
+    const QMatrix4x4 mvp = m_projection * m_modelView;
+    glUniformMatrix4fv(m_mvpLocation, 1, GL_FALSE, mvp.constData());
+    glUniform1f(m_pointSizeLocation, m_pointSize);
+    glUniform1i(m_monoColorLocation, (m_colorMode == ColorMode::Mono) ? 1 : 0);
 
-    GLint psLoc = glGetUniformLocation(m_shaderProgram, "pointSize");
-    glUniform1f(psLoc, m_pointSize);
-
-    GLint monoLoc = glGetUniformLocation(m_shaderProgram, "monoColor");
-    glUniform1i(monoLoc, (m_colorMode == ColorMode::Mono) ? 1 : 0);
-
-    // 点云
+    // 点云：交互时通过同一 VBO 的 attribute stride 做均匀抽样。
     if (!m_points.isEmpty()) {
+        const int pointStride = currentPointStride();
+        configurePointAttributes(pointStride);
+        const int pointCount = m_points.size() / 3;
+        const int drawCount = (pointCount + pointStride - 1) / pointStride;
         glBindVertexArray(m_vao);
-        glDrawArrays(GL_POINTS, 0, m_points.size() / 3);
+        glDrawArrays(GL_POINTS, 0, drawCount);
         glBindVertexArray(0);
     }
 
     // 相机位姿金字塔线框（颜色取 attribute，不受单色模式影响）
     if (m_frustaVisible && !m_lineVertices.isEmpty()) {
-        glUniform1i(monoLoc, 0);
-        glLineWidth(1.5f);
+        glUniform1i(m_monoColorLocation, 0);
         glBindVertexArray(m_lineVao);
         glDrawArrays(GL_LINES, 0, m_lineVertices.size() / 3);
         glBindVertexArray(0);
@@ -292,11 +334,10 @@ void PointCloudWidget::paintGL()
     // 相机缩略图四边形（逐相机绘制；待上传缩略图在此惰性创建纹理）
     if (m_frustaVisible && m_quadShaderProgram && m_quadVertexCount > 0) {
         glUseProgram(m_quadShaderProgram);
-        GLint quadMvpLoc = glGetUniformLocation(m_quadShaderProgram, "mvp");
-        glUniformMatrix4fv(quadMvpLoc, 1, GL_FALSE, mvp.constData());
-        GLint texLoc = glGetUniformLocation(m_quadShaderProgram, "frustaTex");
-        glUniform1i(texLoc, 0);
+        glUniformMatrix4fv(m_quadMvpLocation, 1, GL_FALSE, mvp.constData());
+        glUniform1i(m_frustaTexLocation, 0);
         glActiveTexture(GL_TEXTURE0);
+        glBindVertexArray(m_quadVao);
         const int quads = m_quadVertexCount / 6;
         for (int i = 0; i < quads; ++i) {
             // 惰性纹理上传：paintGL 时上下文必然已初始化
@@ -311,7 +352,6 @@ void PointCloudWidget::paintGL()
             }
             if (!m_frustaTextures.value(i))
                 continue;
-            glBindVertexArray(m_quadVao);
             m_frustaTextures[i]->bind();
             glDrawArrays(GL_TRIANGLES, i * 6, 6);
             m_frustaTextures[i]->release();
@@ -325,67 +365,107 @@ void PointCloudWidget::paintGL()
 
 void PointCloudWidget::updateBuffers()
 {
-    makeCurrent();
-    if (!m_vao || !m_vbo) {
-        doneCurrent();
-        return;
-    }
-
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-
-    size_t pointBytes = m_points.size() * sizeof(float);
-    size_t colorBytes = m_colors.size() * sizeof(float);
-    size_t totalBytes = pointBytes + colorBytes;
-
-    glBufferData(GL_ARRAY_BUFFER, totalBytes, nullptr, GL_STATIC_DRAW);
-    if (pointBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, pointBytes, m_points.constData());
-    if (colorBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, pointBytes, colorBytes, m_colors.constData());
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>(0));
-    glEnableVertexAttribArray(0);
-
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
-                          reinterpret_cast<void *>(pointBytes));
-    glEnableVertexAttribArray(1);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    doneCurrent();
+    m_pointBufferDirty = true;
+    m_pointAttribStride = 0;
 }
 
 void PointCloudWidget::updateLineBuffers()
 {
-    makeCurrent();
-    if (!m_lineVao || !m_lineVbo) {
-        doneCurrent();
-        return;
+    m_lineBufferDirty = true;
+}
+
+void PointCloudWidget::uploadDirtyBuffers()
+{
+    if (m_pointBufferDirty && m_vao && m_vbo) {
+        glBindVertexArray(m_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+
+        const GLsizeiptr pointBytes = GLsizeiptr(m_points.size()) * sizeof(float);
+        const GLsizeiptr colorBytes = GLsizeiptr(m_colors.size()) * sizeof(float);
+        glBufferData(GL_ARRAY_BUFFER, pointBytes + colorBytes, nullptr, GL_DYNAMIC_DRAW);
+        if (pointBytes > 0)
+            glBufferSubData(GL_ARRAY_BUFFER, 0, pointBytes, m_points.constData());
+        if (colorBytes > 0)
+            glBufferSubData(GL_ARRAY_BUFFER, pointBytes, colorBytes, m_colors.constData());
+
+        m_pointBufferDirty = false;
+        m_pointAttribStride = 0;
     }
 
-    glBindVertexArray(m_lineVao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
+    if (m_lineBufferDirty && m_lineVao && m_lineVbo) {
+        glBindVertexArray(m_lineVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
 
-    size_t vertexBytes = m_lineVertices.size() * sizeof(float);
-    size_t colorBytes = m_lineColors.size() * sizeof(float);
+        const GLsizeiptr vertexBytes = GLsizeiptr(m_lineVertices.size()) * sizeof(float);
+        const GLsizeiptr colorBytes = GLsizeiptr(m_lineColors.size()) * sizeof(float);
+        glBufferData(GL_ARRAY_BUFFER, vertexBytes + colorBytes, nullptr, GL_DYNAMIC_DRAW);
+        if (vertexBytes > 0)
+            glBufferSubData(GL_ARRAY_BUFFER, 0, vertexBytes, m_lineVertices.constData());
+        if (colorBytes > 0)
+            glBufferSubData(GL_ARRAY_BUFFER, vertexBytes, colorBytes, m_lineColors.constData());
 
-    glBufferData(GL_ARRAY_BUFFER, vertexBytes + colorBytes, nullptr, GL_STATIC_DRAW);
-    if (vertexBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, vertexBytes, m_lineVertices.constData());
-    if (colorBytes > 0)
-        glBufferSubData(GL_ARRAY_BUFFER, vertexBytes, colorBytes, m_lineColors.constData());
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>(0));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
+                              reinterpret_cast<void *>(vertexBytes));
+        glEnableVertexAttribArray(1);
+        m_lineBufferDirty = false;
+    }
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>(0));
-    glEnableVertexAttribArray(0);
-
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0,
-                          reinterpret_cast<void *>(vertexBytes));
-    glEnableVertexAttribArray(1);
+    if (m_quadBufferDirty && m_quadVao && m_quadVbo) {
+        glBindVertexArray(m_quadVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_quadVbo);
+        const GLsizeiptr quadBytes = GLsizeiptr(m_quadVertices.size()) * sizeof(float);
+        glBufferData(GL_ARRAY_BUFFER, quadBytes,
+                     m_quadVertices.isEmpty() ? nullptr : m_quadVertices.constData(),
+                     GL_DYNAMIC_DRAW);
+        if (m_quadVertexCount > 0) {
+            constexpr GLsizei stride = 5 * sizeof(float);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<void *>(0));
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<void *>(3 * sizeof(float)));
+            glEnableVertexAttribArray(1);
+        }
+        m_quadBufferDirty = false;
+    }
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
-    doneCurrent();
+}
+
+void PointCloudWidget::configurePointAttributes(int pointStride)
+{
+    const int maxPointStride = std::max(1, m_maxVertexAttribStride / int(3 * sizeof(float)));
+    pointStride = std::clamp(pointStride, 1, maxPointStride);
+    if (pointStride == m_pointAttribStride)
+        return;
+
+    const GLsizei strideBytes = GLsizei(pointStride * 3 * sizeof(float));
+    const GLsizeiptr pointBytes = GLsizeiptr(m_points.size()) * sizeof(float);
+    glBindVertexArray(m_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, strideBytes,
+                          reinterpret_cast<void *>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, strideBytes,
+                          reinterpret_cast<void *>(pointBytes));
+    glEnableVertexAttribArray(1);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    m_pointAttribStride = pointStride;
+}
+
+int PointCloudWidget::currentPointStride() const
+{
+    if ((!m_rotating && !m_panning && !m_wheelInteracting) || m_points.isEmpty())
+        return 1;
+
+    const int pointCount = m_points.size() / 3;
+    const int desiredStride = 1 + (pointCount - 1) / kInteractivePointBudget;
+    const int maxPointStride = std::max(1, m_maxVertexAttribStride / int(3 * sizeof(float)));
+    return std::min(desiredStride, maxPointStride);
 }
 
 // ── 相机位姿金字塔 ──
@@ -395,29 +475,49 @@ void PointCloudWidget::setCameraFrusta(const QVector<float> &lineVertices,
                                        const QVector<QVector3D> &quadCorners,
                                        const QStringList &imagePaths)
 {
-    // 递增任务代数：作废仍在后台加载的旧缩略图任务
+    if (lineVertices == m_lineVertices && lineColors == m_lineColors
+        && quadCorners == m_frustaQuadCorners && imagePaths == m_frustaImagePaths) {
+        return;
+    }
+
+    // 递增任务代数并丢弃尚未开始的旧任务，运行中的任务由 generation 校验隔离。
     ++m_frustaGeneration;
+    m_thumbnailThreadPool.clear();
 
     m_lineVertices = lineVertices;
     m_lineColors = lineColors;
-    updateLineBuffers();
 
-    // 缩略图四边形：替换纹理数组并重建顶点缓冲
-    qDeleteAll(m_frustaTextures);
-    m_frustaTextures.clear();
+    releaseFrustaTextures();
     m_frustaPendingTextures.clear();
+    m_frustaQuadCorners = quadCorners;
+    m_frustaImagePaths = imagePaths;
+    m_quadVertices.clear();
+
     const int cameraCount = quadCorners.size() / 4;
     const bool hasImages = cameraCount > 0 && imagePaths.size() == cameraCount;
     if (hasImages) {
-        m_frustaQuadCorners = quadCorners;
-        m_frustaImagePaths = imagePaths;
         m_frustaTextures.resize(cameraCount);
         m_frustaTextures.fill(nullptr);
-    } else {
-        m_frustaQuadCorners.clear();
-        m_frustaImagePaths.clear();
+        m_quadVertices.reserve(cameraCount * 6 * 5);
+
+        // 交错顶点 pos(3)+uv(2)，每相机 6 顶点；成员存储保证惰性上传时数据有效。
+        const float uv[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+        for (int i = 0; i < cameraCount; ++i) {
+            const QVector3D c[4] = {
+                quadCorners.at(i * 4 + 0), quadCorners.at(i * 4 + 1),
+                quadCorners.at(i * 4 + 2), quadCorners.at(i * 4 + 3)};
+            const QVector3D verts[6] = {c[0], c[1], c[2], c[0], c[2], c[3]};
+            for (int v = 0; v < 6; ++v) {
+                m_quadVertices << verts[v].x() << verts[v].y() << verts[v].z()
+                               << uv[v][0] << uv[v][1];
+            }
+        }
     }
+    m_quadVertexCount = m_quadVertices.size() / 5;
+    recomputeFrustaBBox();
+    updateLineBuffers();
     updateQuadBuffers();
+    updateProjectionMatrix();
 
     if (hasImages)
         startThumbnailLoading();
@@ -427,13 +527,19 @@ void PointCloudWidget::setCameraFrusta(const QVector<float> &lineVertices,
 void PointCloudWidget::clearCameraFrusta()
 {
     ++m_frustaGeneration;
-    qDeleteAll(m_frustaTextures);
-    m_frustaTextures.clear();
+    m_thumbnailThreadPool.clear();
+    releaseFrustaTextures();
     m_frustaPendingTextures.clear();
+    m_lineVertices.clear();
+    m_lineColors.clear();
     m_frustaQuadCorners.clear();
     m_frustaImagePaths.clear();
+    m_quadVertices.clear();
     m_quadVertexCount = 0;
+    recomputeFrustaBBox();
+    updateLineBuffers();
     updateQuadBuffers();
+    updateProjectionMatrix();
     update();
 }
 
@@ -463,51 +569,29 @@ int PointCloudWidget::pendingFrustaTextureCount() const
     return count;
 }
 
+int PointCloudWidget::displayedPointCount() const
+{
+    return m_points.size() / 3;
+}
+
 void PointCloudWidget::updateQuadBuffers()
 {
-    makeCurrent();
-    if (!m_quadVao || !m_quadVbo) {
-        doneCurrent();
+    m_quadBufferDirty = true;
+}
+
+void PointCloudWidget::releaseFrustaTextures()
+{
+    if (m_frustaTextures.isEmpty())
         return;
-    }
 
-    // 交错顶点 pos(3)+uv(2)，每相机 6 顶点；UV 按从光心沿光轴（+z）看向底面时
-    // 图像正立的方向（针孔模型）：图像左 = 相机系 -x、图像上 = 相机系 -y，
-    // 故左上=c0(-x,-y)、右上=c1(+x,-y)、右下=c2(+x,+y)、左下=c3(-x,+y)
-    QVector<float> interleaved;
-    interleaved.reserve(m_frustaImagePaths.size() * 6 * 5);
-    const float uv[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
-    for (int i = 0; i < m_frustaImagePaths.size(); ++i) {
-        const QVector3D c[4] = {
-            m_frustaQuadCorners.at(i * 4 + 0), m_frustaQuadCorners.at(i * 4 + 1),
-            m_frustaQuadCorners.at(i * 4 + 2), m_frustaQuadCorners.at(i * 4 + 3)};
-        // 顶点次序（uv 见上）：c0, c1, c2,  c0, c2, c3
-        const QVector3D verts[6] = {c[0], c[1], c[2], c[0], c[2], c[3]};
-        for (int v = 0; v < 6; ++v) {
-            interleaved << verts[v].x() << verts[v].y() << verts[v].z()
-                        << uv[v][0] << uv[v][1];
-        }
-    }
-
-    m_quadVertexCount = interleaved.size() / 5;
-
-    glBindVertexArray(m_quadVao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_quadVbo);
-    glBufferData(GL_ARRAY_BUFFER, interleaved.size() * sizeof(float),
-                 interleaved.isEmpty() ? nullptr : interleaved.constData(),
-                 GL_STATIC_DRAW);
-    if (m_quadVertexCount > 0) {
-        constexpr int stride = 5 * sizeof(float);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(0));
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride,
-                              reinterpret_cast<void *>(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-    }
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    doneCurrent();
+    const bool needsContext = m_glInitialized
+                              && QOpenGLContext::currentContext() != context();
+    if (needsContext)
+        makeCurrent();
+    qDeleteAll(m_frustaTextures);
+    m_frustaTextures.clear();
+    if (needsContext)
+        doneCurrent();
 }
 
 void PointCloudWidget::startThumbnailLoading()
@@ -518,15 +602,24 @@ void PointCloudWidget::startThumbnailLoading()
         const int index = i;
         if (path.isEmpty())
             continue;
-        QThreadPool::globalInstance()->start([this, generation, index, path]() {
+        m_thumbnailThreadPool.start([this, generation, index, path]() {
             QImageReader reader(path);
             reader.setAutoTransform(true);
-            const QImage img = reader.read();
-            if (img.isNull())
+            QSize decodedSize = reader.size();
+            if (decodedSize.isValid()
+                && (decodedSize.width() > kThumbMaxSize
+                    || decodedSize.height() > kThumbMaxSize)) {
+                decodedSize.scale(kThumbMaxSize, kThumbMaxSize, Qt::KeepAspectRatio);
+                reader.setScaledSize(decodedSize);
+            }
+            QImage thumb = reader.read();
+            if (thumb.isNull())
                 return;
-            const QImage thumb =
-                img.scaled(kThumbMaxSize, kThumbMaxSize,
-                           Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            // 少数图像插件不支持读取尺寸或解码期缩放，兜底保证纹理最长边不超过上限。
+            if (thumb.width() > kThumbMaxSize || thumb.height() > kThumbMaxSize) {
+                thumb = thumb.scaled(kThumbMaxSize, kThumbMaxSize,
+                                     Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            }
             if (thumb.isNull())
                 return;
             emit frustaThumbnailReady(generation, index, thumb);
@@ -556,6 +649,48 @@ void PointCloudWidget::updateModelViewMatrix()
     m_modelView.translate(0.0f, 0.0f, -m_cameraDistance);
     m_modelView.rotate(m_rotation);
     m_modelView.translate(-m_pivot);
+    updateProjectionMatrix();
+}
+
+void PointCloudWidget::updateProjectionMatrix()
+{
+    const float aspect = float(std::max(1, width())) / float(std::max(1, height()));
+    const float radius = sceneRadius();
+    const float depthPadding = std::max(radius * 1.1f, 0.01f);
+    const float minNear = std::max(m_cameraDistance * 0.001f, 0.0001f);
+    const float nearPlane = std::max(m_cameraDistance - depthPadding, minNear);
+    const float farPlane = std::max(m_cameraDistance + depthPadding,
+                                    nearPlane + std::max(radius * 0.01f, 0.01f));
+
+    m_projection.setToIdentity();
+    m_projection.perspective(m_fov, aspect, nearPlane, farPlane);
+}
+
+void PointCloudWidget::recomputeFrustaBBox()
+{
+    m_frustaBBoxValid = false;
+    auto includePoint = [this](float x, float y, float z) {
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            return;
+
+        if (!m_frustaBBoxValid) {
+            m_frustaBBoxMin = QVector3D(x, y, z);
+            m_frustaBBoxMax = m_frustaBBoxMin;
+            m_frustaBBoxValid = true;
+        } else {
+            m_frustaBBoxMin.setX(std::min(m_frustaBBoxMin.x(), x));
+            m_frustaBBoxMin.setY(std::min(m_frustaBBoxMin.y(), y));
+            m_frustaBBoxMin.setZ(std::min(m_frustaBBoxMin.z(), z));
+            m_frustaBBoxMax.setX(std::max(m_frustaBBoxMax.x(), x));
+            m_frustaBBoxMax.setY(std::max(m_frustaBBoxMax.y(), y));
+            m_frustaBBoxMax.setZ(std::max(m_frustaBBoxMax.z(), z));
+        }
+    };
+
+    for (int i = 0; i + 2 < m_lineVertices.size(); i += 3)
+        includePoint(m_lineVertices[i], m_lineVertices[i + 1], m_lineVertices[i + 2]);
+    for (const QVector3D &corner : m_frustaQuadCorners)
+        includePoint(corner.x(), corner.y(), corner.z());
 }
 
 // ── 点云数据接口 ──
@@ -564,16 +699,12 @@ void PointCloudWidget::updatePointCloud(const QVector<float> &points,
                                         const QVector<float> &colors,
                                         bool resetView)
 {
-    m_points = points;
-    m_colors = colors;
-
-    if (m_colors.size() < m_points.size()) {
-        int needed = m_points.size() - m_colors.size();
-        for (int i = 0; i < needed; ++i)
-            m_colors.append(1.0f);
-    }
-
-    recomputeBBox();
+    m_points.clear();
+    m_colors.clear();
+    m_bboxValid = false;
+    m_points.reserve((points.size() / 3) * 3);
+    m_colors.reserve((points.size() / 3) * 3);
+    appendDisplayPoints(points, colors);
     updateBuffers();
 
     if (resetView)
@@ -586,16 +717,7 @@ void PointCloudWidget::appendPointCloud(const QVector<float> &points,
                                         const QVector<float> &colors,
                                         bool resetView)
 {
-    m_points.append(points);
-    m_colors.append(colors);
-
-    if (m_colors.size() < m_points.size()) {
-        int needed = m_points.size() - m_colors.size();
-        for (int i = 0; i < needed; ++i)
-            m_colors.append(1.0f);
-    }
-
-    recomputeBBox();
+    appendDisplayPoints(points, colors);
     updateBuffers();
 
     if (resetView)
@@ -604,37 +726,87 @@ void PointCloudWidget::appendPointCloud(const QVector<float> &points,
     update();
 }
 
+void PointCloudWidget::appendDisplayPoints(const QVector<float> &points,
+                                           const QVector<float> &colors)
+{
+    const int sourcePointCount = points.size() / 3;
+    m_points.reserve(m_points.size() + sourcePointCount * 3);
+    m_colors.reserve(m_colors.size() + sourcePointCount * 3);
+
+    for (int pointIndex = 0; pointIndex < sourcePointCount; ++pointIndex) {
+        const int offset = pointIndex * 3;
+        const float x = points[offset];
+        const float y = points[offset + 1];
+        const float z = points[offset + 2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            continue;
+
+        m_points << x << y << z;
+        if (offset + 2 < colors.size()
+            && std::isfinite(colors[offset])
+            && std::isfinite(colors[offset + 1])
+            && std::isfinite(colors[offset + 2])) {
+            m_colors << colors[offset] << colors[offset + 1] << colors[offset + 2];
+        } else {
+            m_colors << 1.0f << 1.0f << 1.0f;
+        }
+
+        const QVector3D point(x, y, z);
+        if (!m_bboxValid) {
+            m_bboxMin = point;
+            m_bboxMax = point;
+            m_bboxValid = true;
+        } else {
+            m_bboxMin.setX(std::min(m_bboxMin.x(), x));
+            m_bboxMin.setY(std::min(m_bboxMin.y(), y));
+            m_bboxMin.setZ(std::min(m_bboxMin.z(), z));
+            m_bboxMax.setX(std::max(m_bboxMax.x(), x));
+            m_bboxMax.setY(std::max(m_bboxMax.y(), y));
+            m_bboxMax.setZ(std::max(m_bboxMax.z(), z));
+        }
+    }
+}
+
 void PointCloudWidget::clearPoints()
 {
     m_points.clear();
     m_colors.clear();
     m_bboxValid = false;
     updateBuffers();
+    updateProjectionMatrix();
     update();
 }
 
 // ── 包围盒与自动适配 ──
 
-void PointCloudWidget::recomputeBBox()
+float PointCloudWidget::bboxRadius() const
 {
-    if (m_points.isEmpty()) {
-        m_bboxValid = false;
-        return;
-    }
+    if (!m_bboxValid)
+        return 1.0f;
 
-    m_bboxMin = QVector3D(m_points[0], m_points[1], m_points[2]);
-    m_bboxMax = m_bboxMin;
+    const float radius = (m_bboxMax - m_bboxMin).length() * 0.5f;
+    return (std::isfinite(radius) && radius >= 1e-6f) ? radius : 1.0f;
+}
 
-    for (int i = 3; i + 2 < m_points.size(); i += 3) {
-        float x = m_points[i], y = m_points[i + 1], z = m_points[i + 2];
-        m_bboxMin.setX(std::min(m_bboxMin.x(), x));
-        m_bboxMin.setY(std::min(m_bboxMin.y(), y));
-        m_bboxMin.setZ(std::min(m_bboxMin.z(), z));
-        m_bboxMax.setX(std::max(m_bboxMax.x(), x));
-        m_bboxMax.setY(std::max(m_bboxMax.y(), y));
-        m_bboxMax.setZ(std::max(m_bboxMax.z(), z));
-    }
-    m_bboxValid = true;
+float PointCloudWidget::sceneRadius() const
+{
+    float radius = 0.0f;
+    auto includeBounds = [this, &radius](const QVector3D &minimum,
+                                         const QVector3D &maximum) {
+        for (int mask = 0; mask < 8; ++mask) {
+            const QVector3D corner((mask & 1) ? maximum.x() : minimum.x(),
+                                   (mask & 2) ? maximum.y() : minimum.y(),
+                                   (mask & 4) ? maximum.z() : minimum.z());
+            radius = std::max(radius, (corner - m_pivot).length());
+        }
+    };
+
+    if (m_bboxValid)
+        includeBounds(m_bboxMin, m_bboxMax);
+    if (m_frustaBBoxValid)
+        includeBounds(m_frustaBBoxMin, m_frustaBBoxMax);
+
+    return (std::isfinite(radius) && radius >= 1e-6f) ? radius : 1.0f;
 }
 
 void PointCloudWidget::fitToData()
@@ -647,15 +819,13 @@ void PointCloudWidget::fitToData()
 
     m_pivot = (m_bboxMin + m_bboxMax) * 0.5f;
 
-    QVector3D extent = m_bboxMax - m_bboxMin;
-    float maxDim = std::max({extent.x(), extent.y(), extent.z()});
-    if (maxDim < 1e-6f)
-        maxDim = 1.0f;
-
-    float halfFovRad = m_fov * 0.5f * kPi / 180.0f;
-    m_cameraDistance = (maxDim * 0.5f) / std::tan(halfFovRad) * 1.2f;
-    if (m_cameraDistance < 0.1f)
-        m_cameraDistance = 0.1f;
+    const float aspect = float(std::max(1, width())) / float(std::max(1, height()));
+    const float halfVerticalFov = m_fov * 0.5f * kPi / 180.0f;
+    const float halfHorizontalFov = std::atan(std::tan(halfVerticalFov) * aspect);
+    const float limitingHalfFov = std::max(0.01f,
+                                           std::min(halfVerticalFov, halfHorizontalFov));
+    m_cameraDistance = bboxRadius() / std::sin(limitingHalfFov) * 1.1f;
+    m_cameraDistance = std::max(m_cameraDistance, 0.01f);
 }
 
 // ── 轨迹球旋转 ──
@@ -709,10 +879,13 @@ void PointCloudWidget::mousePressEvent(QMouseEvent *event)
 {
     m_lastMousePos = event->pos();
 
-    if (event->button() == Qt::LeftButton)
+    if (event->button() == Qt::LeftButton) {
         m_rotating = true;
-    else if (event->button() == Qt::RightButton)
+        update();
+    } else if (event->button() == Qt::RightButton) {
         m_panning = true;
+        update();
+    }
 }
 
 void PointCloudWidget::mouseMoveEvent(QMouseEvent *event)
@@ -743,6 +916,7 @@ void PointCloudWidget::mouseReleaseEvent(QMouseEvent *event)
     Q_UNUSED(event);
     m_rotating = false;
     m_panning = false;
+    update();
 }
 
 void PointCloudWidget::wheelEvent(QWheelEvent *event)
@@ -755,7 +929,10 @@ void PointCloudWidget::wheelEvent(QWheelEvent *event)
     float factor = std::pow(0.9f, steps);
     m_cameraDistance *= factor;
 
-    m_cameraDistance = std::clamp(m_cameraDistance, 0.01f, 50000.0f);
+    const float maxDistance = std::max(50000.0f, sceneRadius() * 100.0f);
+    m_cameraDistance = std::clamp(m_cameraDistance, 0.01f, maxDistance);
+    m_wheelInteracting = true;
+    m_wheelIdleTimer.start();
 
     updateModelViewMatrix();
     update();

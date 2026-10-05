@@ -9,6 +9,8 @@
 #include <QPoint>
 #include <QQuaternion>
 #include <QStringList>
+#include <QThreadPool>
+#include <QTimer>
 #include <QVector>
 #include <QVector3D>
 
@@ -98,6 +100,9 @@ public slots:
     /// 纹理创建不会发生，用此计数验证异步加载链路）
     int pendingFrustaTextureCount() const;
 
+    /// 过滤无效坐标后，实际进入显示缓存的点数量（状态显示/测试自检用）
+    int displayedPointCount() const;
+
 private slots:
     /// 后台缩略图加载完成（generation 校验防止旧任务回写到已替换的数据）
     void onFrustaThumbnailReady(int generation, int index, const QImage &image);
@@ -121,28 +126,47 @@ private:
     void updateBuffers();
     void updateLineBuffers();
     void updateQuadBuffers();
+    void uploadDirtyBuffers();
+    void configurePointAttributes(int pointStride);
+    void releaseFrustaTextures();
     void startThumbnailLoading();
     void updateModelViewMatrix();
+    void updateProjectionMatrix();
+    void recomputeFrustaBBox();
     void fitToData();
-    void recomputeBBox();
+    void appendDisplayPoints(const QVector<float> &points, const QVector<float> &colors);
+    float bboxRadius() const;
+    float sceneRadius() const;
+    int currentPointStride() const;
     QVector3D mapToTrackball(const QPoint &pos) const;
     void applyTrackballRotation(const QPoint &lastPos, const QPoint &currPos);
 
     GLuint m_shaderProgram = 0;
     GLuint m_vbo = 0;
     GLuint m_vao = 0;
+    GLint m_mvpLocation = -1;
+    GLint m_pointSizeLocation = -1;
+    GLint m_monoColorLocation = -1;
+    bool m_pointBufferDirty = true;
+    int m_pointAttribStride = 0;
+    int m_maxVertexAttribStride = 2048;
 
     // 相机位姿金字塔线框（GL_LINES，端点成对；与点云共用着色器，颜色取 attribute 1）
     GLuint m_lineVao = 0;
     GLuint m_lineVbo = 0;
     QVector<float> m_lineVertices;
     QVector<float> m_lineColors;
+    bool m_lineBufferDirty = true;
     bool m_frustaVisible = true;
 
     // 相机缩略图四边形（GL_TRIANGLES，顶点交错 pos3+uv2；独立纹理着色器）
     GLuint m_quadShaderProgram = 0;
     GLuint m_quadVao = 0;
     GLuint m_quadVbo = 0;
+    GLint m_quadMvpLocation = -1;
+    GLint m_frustaTexLocation = -1;
+    QVector<float> m_quadVertices;
+    bool m_quadBufferDirty = true;
     int m_quadVertexCount = 0;                  // 6 顶点/相机
     QVector<QVector3D> m_frustaQuadCorners;     // 每相机 4 个底面角（显示系）
     QStringList m_frustaImagePaths;             // 每相机对应图像路径（空串不贴图）
@@ -150,6 +174,7 @@ private:
                                                 // 避免在未初始化 GL 上下文时跨线程上传）
     QVector<QOpenGLTexture *> m_frustaTextures; // 与相机序一致，未加载为 nullptr
     int m_frustaGeneration = 0;                 // 异步加载任务代数，替换数据时递增
+    QThreadPool m_thumbnailThreadPool;
 
     QMatrix4x4 m_projection;
     QMatrix4x4 m_modelView;
@@ -165,6 +190,9 @@ private:
     QVector3D m_bboxMin;
     QVector3D m_bboxMax;
     bool m_bboxValid = false;
+    QVector3D m_frustaBBoxMin;
+    QVector3D m_frustaBBoxMax;
+    bool m_frustaBBoxValid = false;
 
     float m_pointSize = 2.0f;
     QColor m_backgroundColor;
@@ -174,6 +202,9 @@ private:
     QPoint m_lastMousePos;
     bool m_rotating = false;
     bool m_panning = false;
+    bool m_wheelInteracting = false;
+    QTimer m_wheelIdleTimer;
+    bool m_glInitialized = false;
 };
 
 #endif // POINTCLOUDWIDGET_H

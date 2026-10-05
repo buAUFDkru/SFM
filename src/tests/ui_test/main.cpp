@@ -49,6 +49,7 @@
 #include <pcl/io/ply_io.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #ifndef PLUGINS_DIR_DEFAULT
@@ -395,9 +396,14 @@ private slots:
     {
         // offscreen 平台下不实际渲染，仅验证构造/数据接口不崩溃
         PointCloudWidget w;
-        QVector<float> pts{0, 0, 0, 1, 1, 1};
-        QVector<float> cols{1, 0, 0, 0, 1, 0};
+        QVector<float> pts{0, 0, 0,
+                           std::numeric_limits<float>::quiet_NaN(), 1, 1,
+                           2, 2, 2};
+        QVector<float> cols{1, 0, 0};
         w.updatePointCloud(pts, cols, true);
+        CHECK_UI(w.displayedPointCount() == 2, "点云显示过滤非法坐标并补齐缺失颜色");
+        w.appendPointCloud(QVector<float>{3, 3, 3}, QVector<float>{}, false);
+        CHECK_UI(w.displayedPointCount() == 3, "追加点云沿用显示过滤路径");
         w.setColorMode(PointCloudWidget::ColorMode::Mono);
         w.setPointSize(4.0f);
         w.setBackgroundColor(Qt::white);
@@ -500,6 +506,11 @@ private slots:
         w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners, geom.imagePaths);
         QTest::qWait(2000);
         CHECK_UI(w.pendingFrustaTextureCount() == 1, "缩略图异步加载进入待上传队列");
+
+        // 完全相同的金字塔重复设置应复用显示缓存，不清空或重新排队缩略图。
+        w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners, geom.imagePaths);
+        QTest::qWait(100);
+        CHECK_UI(w.pendingFrustaTextureCount() == 1, "重复金字塔设置复用缩略图缓存");
 
         // 无效路径 → 不产生待上传图像且不崩溃
         w.setCameraFrusta(geom.lines, lineCols, geom.quadCorners,
