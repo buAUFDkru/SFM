@@ -33,7 +33,7 @@ public:
     /// 获取所有已注册方法的显示名称列表
     QStringList availableDisplayNames() const;
 
-    /// 显式注册内置方法（StereoSGBM / PatchMatch），幂等。
+    /// 显式注册内置方法（PatchMatch / PatchMatchV2），幂等。
     /// 静态库链接时实现 TU 的静态注册对象可能不会被拉入，因此由重建管线运行前调用。
     void registerBuiltinMethods();
 
@@ -51,7 +51,7 @@ private:
  *
  * 在实现类的 .cpp 文件中定义一个静态对象即可自动注册。
  * 示例：
- *   static DenseReconstructionRegistrar<StereoSGBMReconstructor> registrar;
+ *   static DenseReconstructionRegistrar<PatchMatchReconstructor> registrar;
  */
 template <typename T>
 class DenseReconstructionRegistrar

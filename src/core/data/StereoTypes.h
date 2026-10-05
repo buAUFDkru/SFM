@@ -57,46 +57,4 @@ struct StereoPairResult
     cv::Mat R2_rect;           ///< 右图校正旋转矩阵 (3×3, CV_64FC1), 原始相机→校正后相机
 };
 
-/**
- * @brief 密集立体匹配配置参数
- *
- * 控制立体匹配管线的各个阶段参数，包括选图策略、SGBM匹配、WLS滤波和深度图生成。
- */
-struct DenseStereoConfig
-{
-    // ── 选图策略 ──
-    int targetPairsPerView = 3;      ///< 每张视图选择的最优匹配对数（贪心策略上限）
-    double minOverlapRatio = 0.05;   ///< 最小重叠率阈值（Jaccard系数），低于此值的图像对被排除
-    double minAngleDeg = 3.0;        ///< 最小视角差（度），太小则基线过短、深度精度差
-    double maxAngleDeg = 60.0;       ///< 最大视角差（度），太大则遮挡严重、匹配困难
-
-    // ── SGBM 参数 ──
-    int minDisparity = 0;            ///< 最小视差（像素），通常为0（场景在相机前方）
-    int numDisparities = 160;        ///< 视差搜索范围（像素，必须为16的倍数），越大计算越慢
-    int blockSize = 3;               ///< 匹配块大小（奇数, 3~11），3为默认推荐值
-    int preFilterCap = 31;           ///< 预处理截断值（1~63），控制Sobel滤波的输出范围
-    int uniquenessRatio = 10;        ///< 唯一性比率（0~100），越大越严格，次优匹配需比最优差此百分比
-    int speckleWindowSize = 100;     ///< 斑点滤波窗口大小（像素），小于此的连通区域被视为噪点
-    int speckleRange = 1;            ///< 斑点滤波范围（视差单位），同一区域内最大视差变化
-    int disp12MaxDiff = 1;           ///< 左右一致性检查阈值（像素），-1表示不检查
-    bool useHHMode = true;           ///< 使用HH模式（全分辨率动态规划），比SGBM更精确但稍慢
-    int P1Scale = 8;                 ///< P1惩罚系数缩放: P1 = P1Scale * channels * blockSize^2
-    int P2Scale = 32;                ///< P2惩罚系数缩放: P2 = P2Scale * channels * blockSize^2（P2 > P1）
-
-    // ── WLS 滤波参数 ──
-    bool useWLSFilter = true;        ///< 是否使用WLS（加权最小二乘）后滤波，显著提升视差图边缘质量
-    double wlsLambda = 8000.0;       ///< WLS平滑度参数，越大越平滑（推荐: 1000~10000）
-    double wlsSigmaColor = 1.5;      ///< WLS边缘保持参数，越小越敏感于颜色变化（推荐: 0.5~3.0）
-
-    // ── 深度图参数 ──
-    double minDepth = 0.1;           ///< 最小深度（米），低于此值的深度被置零
-    double maxDepth = 100.0;         ///< 最大深度（米），超过此值的深度被置零
-
-    // ── 视差自动估计 ──
-    bool autoDisparityRange = true;  ///< 是否根据匹配点自动估计视差范围（推荐开启）
-
-    // ── 调试输出 ──
-    std::string saveRectifiedDir;    ///< 保存校正后图像的目录（空则不保存）
-};
-
 #endif // STEREOTYPES_H

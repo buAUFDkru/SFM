@@ -104,15 +104,21 @@ void MainWindow::runPipelineSyncForTest()
         m_pipeline = new ReconstructionPipeline();   // 注：非 QObject，无父对象
     applyConfigToPipeline();
     ReconstructionConfig cfg = m_pipeline->config();
-    // 预设密集方法，避免 execute() 在稀疏阶段后阻塞等待 UI 选择
-    cfg.denseReconstructionMethod = QStringLiteral("StereoSGBM");
+    // 预设密集方法，避免 execute() 在稀疏阶段后阻塞等待 UI 选择；
+    // PatchMatchV2 快速参数保证测试时长可控
+    cfg.denseReconstructionMethod = QStringLiteral("PatchMatchV2");
     cfg.denseReconstructionParams = {
-        {QStringLiteral("useWLSFilter"), false},
-        {QStringLiteral("numDisparities"), 64},
-        {QStringLiteral("blockSize"), 5},
-        {QStringLiteral("useHHMode"), false},
-        {QStringLiteral("minDisparity"), 0},
-        {QStringLiteral("maxDepth"), 50.0},
+        {QStringLiteral("maxImageSize"), 320},
+        {QStringLiteral("windowRadius"), 3},
+        {QStringLiteral("numSamples"), 5},
+        {QStringLiteral("numIterations"), 2},
+        {QStringLiteral("refineIterations"), 1},
+        {QStringLiteral("multiscale"), false},
+        {QStringLiteral("costTopK"), 1},
+        {QStringLiteral("geomConsistency"), false},
+        {QStringLiteral("fusion"), false},
+        {QStringLiteral("planePrior"), false},
+        {QStringLiteral("filter"), false},
     };
     m_pipeline->setConfig(cfg);
     ReconstructionOutput output = m_pipeline->execute();

@@ -2,7 +2,6 @@
 
 #include "PatchMatchReconstructor.h"
 #include "PatchMatchReconstructorV2.h"
-#include "StereoSGBMReconstructor.h"
 
 DenseReconstructionFactory &DenseReconstructionFactory::instance()
 {
@@ -51,13 +50,9 @@ void DenseReconstructionFactory::registerBuiltinMethods()
 {
     // 幂等注册（静态库链接时，实现 TU 中的静态注册对象可能不被拉入，
     // 因此内置方法统一在此显式登记，由重建管线在运行前调用）。
-    if (m_creators.contains("StereoSGBM")) {
+    if (m_creators.contains("PatchMatch")) {
         return;
     }
-    registerMethod("StereoSGBM", "SGBM 立体匹配",
-                   []() -> IDenseReconstructorPtr {
-                       return std::make_unique<StereoSGBMReconstructor>();
-                   });
     registerMethod("PatchMatch", "PatchMatch 多视图匹配",
                    []() -> IDenseReconstructorPtr {
                        return std::make_unique<PatchMatchReconstructor>();

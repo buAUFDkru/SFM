@@ -9,6 +9,8 @@
 
 #include <QCloseEvent>
 #include <QFrame>
+#include <QScrollArea>
+#include <QScreen>
 #include <QVBoxLayout>
 
 SparseReconstructionDialog::SparseReconstructionDialog(PluginRegistry *registry,
@@ -40,33 +42,55 @@ void SparseReconstructionDialog::setupUI()
 {
     setWindowTitle(tr("稀疏重建"));
     setModal(false);
+    setMinimumWidth(320);
 
     auto *layout = new QVBoxLayout(this);
-    layout->setSpacing(8);
-    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setContentsMargins(0, 0, 0, 0);
+
+    // 参数表单放入滚动区域：算法参数较多、表单较高，
+    // 超出可视高度时用滚轮滚动（与密集重建对话框同一模式）
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+    auto *content = new QWidget(scroll);
+    auto *formLayout = new QVBoxLayout(content);
+    formLayout->setSpacing(8);
+    formLayout->setContentsMargins(12, 12, 12, 12);
 
     m_descriptor = new AlgorithmComboPanel(QStringLiteral("descriptor"),
-                                           m_registry, tr("特征描述符"), this);
-    layout->addWidget(m_descriptor);
+                                           m_registry, tr("特征描述符"), content);
+    formLayout->addWidget(m_descriptor);
 
-    QFrame *line1 = new QFrame(this);
+    QFrame *line1 = new QFrame(content);
     line1->setFrameShape(QFrame::HLine);
     line1->setFrameShadow(QFrame::Sunken);
-    layout->addWidget(line1);
+    formLayout->addWidget(line1);
 
     m_matcher = new AlgorithmComboPanel(QStringLiteral("matcher"),
-                                        m_registry, tr("特征匹配器"), this);
-    layout->addWidget(m_matcher);
+                                        m_registry, tr("特征匹配器"), content);
+    formLayout->addWidget(m_matcher);
 
-    QFrame *line2 = new QFrame(this);
+    QFrame *line2 = new QFrame(content);
     line2->setFrameShape(QFrame::HLine);
     line2->setFrameShadow(QFrame::Sunken);
-    layout->addWidget(line2);
+    formLayout->addWidget(line2);
 
-    m_controls = new ControlButtons(this);
-    layout->addWidget(m_controls);
+    m_controls = new ControlButtons(content);
+    formLayout->addWidget(m_controls);
 
-    setMinimumWidth(320);
+    formLayout->addStretch();
+    scroll->setWidget(content);
+    layout->addWidget(scroll, /*stretch=*/1);
+
+    // 对话框高度不超过屏幕可用高度的 85%，避免超出屏幕
+    if (const QScreen *scr = this->screen()) {
+        const int maxH = static_cast<int>(scr->availableGeometry().height() * 0.85);
+        setMaximumHeight(maxH);
+        resize(minimumSizeHint().expandedTo(QSize(minimumWidth(), maxH / 2)));
+    }
 }
 
 void SparseReconstructionDialog::gatherAlgorithms(

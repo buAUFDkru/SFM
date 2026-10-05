@@ -637,18 +637,21 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
               "密集重建未实现方法被安全跳过(直接路径)");
         check(cap.cloudEvents >= 1, "接收阶段点云事件(sparse,直接路径)");
 
-        // ── 密集重建（P4a: StereoSGBM，复用稀疏中间状态） ──
+        // ── 密集重建（PatchMatchV2，复用稀疏中间状态） ──
         {
+            // 快速参数：缩小工作图像、关闭精化项，保证测试时长可控
             const QMap<QString, QVariant> denseParams{
-                {"useWLSFilter", false}, {"numDisparities", 64},
-                {"blockSize", 5}, {"useHHMode", false},
-                {"minDisparity", 0}, {"maxDepth", 50.0},
+                {"maxImageSize", 320}, {"windowRadius", 3},
+                {"numSamples", 5}, {"numIterations", 2},
+                {"refineIterations", 1}, {"multiscale", false},
+                {"costTopK", 1}, {"geomConsistency", false},
+                {"fusion", false}, {"planePrior", false}, {"filter", false},
             };
-            pipeline.setDenseReconstructionMethod("StereoSGBM", denseParams);
+            pipeline.setDenseReconstructionMethod("PatchMatchV2", denseParams);
             const bool denseOk = pipeline.executeDenseReconstruction();
             const auto &dOut = pipeline.lastOutput();
             check(denseOk && dOut.denseCloud && dOut.denseCloud->size() > 0,
-                  QStringLiteral("StereoSGBM 密集重建成功 (密集点云 %1 点)")
+                  QStringLiteral("PatchMatchV2 密集重建成功 (密集点云 %1 点)")
                       .arg(dOut.denseCloud
                                ? static_cast<int>(dOut.denseCloud->size()) : 0));
             for (const auto &l : cap.logs)
@@ -687,8 +690,8 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
                   "PatchMatch 已注册到 DenseReconstructionFactory");
             check(DenseReconstructionFactory::instance()
                           .availableMethods()
-                          .contains("StereoSGBM"),
-                  "StereoSGBM 已注册到 DenseReconstructionFactory");
+                          .contains("PatchMatchV2"),
+                  "PatchMatchV2 已注册到 DenseReconstructionFactory");
         }
     }
 

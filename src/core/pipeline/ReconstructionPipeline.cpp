@@ -43,7 +43,7 @@
 
 ReconstructionPipeline::ReconstructionPipeline()
 {
-    // 登记内置密集重建方法（StereoSGBM / PatchMatch），幂等；
+    // 登记内置密集重建方法（PatchMatch / PatchMatchV2），幂等；
     // 静态库链接下实现 TU 的静态注册对象不会自动拉入，必须在运行前显式注册。
     DenseReconstructionFactory::instance().registerBuiltinMethods();
 }

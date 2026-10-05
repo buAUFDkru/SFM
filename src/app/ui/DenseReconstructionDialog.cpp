@@ -57,62 +57,7 @@ QList<ParamSchema> schemasForMethod(const QString &method)
         s.tooltip = tip;
         out.append(s);
     };
-    if (method == QStringLiteral("StereoSGBM")) {
-        ParamSchema maxDepth;
-        maxDepth.name = QStringLiteral("maxDepth");
-        maxDepth.type = ParamSchema::Type::Double;
-        maxDepth.defaultValue = 50.0;
-        maxDepth.min = 0.1;
-        maxDepth.max = 1000.0;
-        maxDepth.group = QStringLiteral("SGBM");
-        maxDepth.tooltip = QObject::tr("最大深度（场景单位），超出被置零");
-        out.append(maxDepth);
-
-        ParamSchema numDisp;
-        numDisp.name = QStringLiteral("numDisparities");
-        numDisp.type = ParamSchema::Type::Int;
-        numDisp.defaultValue = 64;
-        numDisp.min = 16;
-        numDisp.max = 1024;
-        numDisp.group = QStringLiteral("SGBM");
-        numDisp.tooltip = QObject::tr("视差搜索范围（16 的倍数），越大越慢");
-        out.append(numDisp);
-
-        ParamSchema blockSize;
-        blockSize.name = QStringLiteral("blockSize");
-        blockSize.type = ParamSchema::Type::Int;
-        blockSize.defaultValue = 5;
-        blockSize.min = 1;
-        blockSize.max = 21;
-        blockSize.group = QStringLiteral("SGBM");
-        blockSize.tooltip = QObject::tr("匹配块大小（奇数，3~11 推荐）");
-        out.append(blockSize);
-
-        ParamSchema minDisp;
-        minDisp.name = QStringLiteral("minDisparity");
-        minDisp.type = ParamSchema::Type::Int;
-        minDisp.defaultValue = 0;
-        minDisp.min = -1024;
-        minDisp.max = 1024;
-        minDisp.group = QStringLiteral("SGBM");
-        out.append(minDisp);
-
-        ParamSchema useHH;
-        useHH.name = QStringLiteral("useHHMode");
-        useHH.type = ParamSchema::Type::Bool;
-        useHH.defaultValue = false;
-        useHH.group = QStringLiteral("SGBM");
-        useHH.tooltip = QObject::tr("使用 HH 全分辨率模式（更精确但更慢）");
-        out.append(useHH);
-
-        ParamSchema useWls;
-        useWls.name = QStringLiteral("useWLSFilter");
-        useWls.type = ParamSchema::Type::Bool;
-        useWls.defaultValue = false;
-        useWls.group = QStringLiteral("SGBM");
-        useWls.tooltip = QObject::tr("启用 WLS 权重最小二乘后滤波（edge 保持）");
-        out.append(useWls);
-    } else if (method == QStringLiteral("PatchMatch")) {
+    if (method == QStringLiteral("PatchMatch")) {
         // 与 PatchMatchReconstructor::Options 的常用字段对齐
         addDouble(QStringLiteral("depthMin"), -1.0, -1.0, 1e6,
                   QStringLiteral("深度"), QObject::tr("最小深度；<0 从稀疏点自动估计"));

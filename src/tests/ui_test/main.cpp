@@ -797,14 +797,20 @@ private slots:
         cfg.imageFiles = files;
         cfg.projectPath = projDir;
         cfg.projectName = QStringLiteral("proj");
-        cfg.denseReconstructionMethod = QStringLiteral("StereoSGBM");
+        cfg.denseReconstructionMethod = QStringLiteral("PatchMatchV2");
+        // 快速参数：缩小工作图像、关闭精化项，保证测试时长可控
         cfg.denseReconstructionParams = {
-            {QStringLiteral("useWLSFilter"), false},
-            {QStringLiteral("numDisparities"), 64},
-            {QStringLiteral("blockSize"), 5},
-            {QStringLiteral("useHHMode"), false},
-            {QStringLiteral("minDisparity"), 0},
-            {QStringLiteral("maxDepth"), 50.0},
+            {QStringLiteral("maxImageSize"), 320},
+            {QStringLiteral("windowRadius"), 3},
+            {QStringLiteral("numSamples"), 5},
+            {QStringLiteral("numIterations"), 2},
+            {QStringLiteral("refineIterations"), 1},
+            {QStringLiteral("multiscale"), false},
+            {QStringLiteral("costTopK"), 1},
+            {QStringLiteral("geomConsistency"), false},
+            {QStringLiteral("fusion"), false},
+            {QStringLiteral("planePrior"), false},
+            {QStringLiteral("filter"), false},
         };
         pipe.setConfig(cfg);
         try {
@@ -864,13 +870,18 @@ private slots:
 
         // 在恢复状态上直接执行密集重建（跳过稀疏）；
         // 与 UI 路径（DenseReconstructionDialog → setDenseReconstructionMethod）一致，先指定方法
-        pipe2.setDenseReconstructionMethod(QStringLiteral("StereoSGBM"),
-                                           {{QStringLiteral("useWLSFilter"), false},
-                                            {QStringLiteral("numDisparities"), 64},
-                                            {QStringLiteral("blockSize"), 5},
-                                            {QStringLiteral("useHHMode"), false},
-                                            {QStringLiteral("minDisparity"), 0},
-                                            {QStringLiteral("maxDepth"), 50.0}});
+        pipe2.setDenseReconstructionMethod(QStringLiteral("PatchMatchV2"),
+                                           {{QStringLiteral("maxImageSize"), 320},
+                                            {QStringLiteral("windowRadius"), 3},
+                                            {QStringLiteral("numSamples"), 5},
+                                            {QStringLiteral("numIterations"), 2},
+                                            {QStringLiteral("refineIterations"), 1},
+                                            {QStringLiteral("multiscale"), false},
+                                            {QStringLiteral("costTopK"), 1},
+                                            {QStringLiteral("geomConsistency"), false},
+                                            {QStringLiteral("fusion"), false},
+                                            {QStringLiteral("planePrior"), false},
+                                            {QStringLiteral("filter"), false}});
         bool denseOk = false;
         try {
             denseOk = pipe2.executeDenseReconstruction();
