@@ -51,14 +51,39 @@ struct TriangulateOptions
     int    baLocalMaxRefinements = 2; ///< 局部BA最大迭代精化次数
     double baLocalMaxRefinementChange = 0.001; ///< 变化率低于此值即停止精化
     int    baLocalMaxTrackLength = 15;///< 轨迹长于此值的点视为已稳定，不参与局部BA
+    /// 局部BA的Ceres迭代上限（COLMAP ba_local_max_num_iterations = 25）。
+    /// 原为硬编码 100，实测每次跑到 43~61 次迭代，占整个重建 46% 的时间。
+    int    baLocalMaxIterations = 25;
 
     // ── 全局BA与精化 ──────────────────────────────────────────────
     int    globalMaxRefinements = 3;  ///< 末尾全局BA迭代精化次数
     double globalMaxRefinementChange = 0.0005;
+    /// 全局BA的Ceres迭代上限（COLMAP ba_global_max_num_iterations = 50）。
+    /// 原为硬编码 200；收尾三轮实测只用到 25/16/16 次。
+    int    baGlobalMaxIterations = 50;
 
     // ── 外点过滤 ──────────────────────────────────────────────────
     double filterMaxReprojErrorPx = 4.0;  ///< 过滤重投影误差阈值（像素）
     double filterMinTriAngleDeg   = 1.5;  ///< 过滤三角化角下限（度）
+
+    // ── 阶段四 4.4：末尾滤波细化 ──────────────────────────────────
+    /**
+     * @brief 末尾滤波的轨迹长度下限
+     *
+     * 重建收尾时删除观测数少于此值的点：轨迹长度 1 的点只有一个观测，
+     * 没有冗余约束、无法检验也无法被 BA 有效约束（COLMAP min_track_len 语义）。
+     */
+    size_t filterMinTrackLength = 2;
+
+    // ── 阶段四 4.6：场景归一化 ────────────────────────────────────
+    bool   enableSceneNormalization = true; ///< 收尾时是否做场景归一化
+    /**
+     * @brief 归一化目标尺度：已注册相机光心到质心的平均距离
+     *
+     * COLMAP NormalizeReconstruction 语义。自标定的尺度本是任意的，
+     * 归一化把任意尺度固定下来，提升下游（密集深度范围估计、可视化）数值稳定。
+     */
+    double sceneNormalizationExtent = 10.0;
 
     /**
      * @brief 种子对初始化后首轮过滤的放宽阈值（像素）
@@ -81,6 +106,45 @@ struct TriangulateOptions
      */
     double initMinTriAngleDeg = 16.0;
     int minSeedPoints3D = 100;  ///< 种子对至少应三角化出的点数，不足则继续放宽门槛
+
+    // ── 阶段五 5.2：径向/切向畸变（全局BA联合精化）────────────────────────
+    /**
+     * @brief 是否在全局BA中联合精化 k1,k2,p1,p2
+     *
+     * 注意：本开关**默认关闭**。实机对照（三数据集各 2 轮）显示打开后
+     * 重投影中位下降但点云点数腰斩（106MEDIA 6389→2769），代价大于收益；
+     * 这里留着开关，强畸变镜头（|k1| > 0.1）或纯精度验证场景再开。
+     */
+    bool refineDistortion = false;
+
+    /**
+     * @brief 精化内参（焦距 / 畸变）所需的已注册相机数下限
+     *
+     * 只有 2 台相机、几百个点时，焦距与「场景尺度」是一对一的同义变换，
+     * 残差下降与焦距减小一样好 —— 自标定会无约束地往任意方向滑。
+     * 实测 106MEDIA 种子对阶段 f 在 3228 / 3675 / 4176 之间乱跳（真值 ≈3660），
+     * 而收敛到 3228 或 4176 的那几次后续重建全部失败「初始全局BA后无有效三维点」。
+     *
+     * 因此焦距与畸变一起门控：注册相机数不足时全局 BA 把内参完全钉死，
+     * 只用针孔模型精化外参与三维点；到收尾阶段（相机已注册满）再放开。
+     */
+    int intrinsicsMinCameras = 8;
+
+    /**
+     * @brief 初值内参是否可信（由阶段五 5.1 决定）
+     *
+     * - `true`  —— K 来自 EXIF 焦距反推。这类值已经很接近真值（实测
+     *   106MEDIA 3659.7 vs 自标定收敛 3676，偏差 0.4%），种子对阶段
+     *   「锁死焦距」只会把真值附近的解钉得更稳。
+     * - `false` —— K 来自 `estimateK` 的 60°FOV 猜测，可能偏 20%+。此时
+     *   必须沿用旧行为（任何相机数都放开焦距），否则锁死在一个错误焦距上
+     *   会直接压垮重建：实测 data（guess 1146 vs 收敛 912）点数从 10334
+     *   掉到 8016，test14 重投影中位从 0.21 掉到 0.58px。
+     */
+    bool intrinsicsTrusted = false;
+
+    /// 5.3：允许 fx ≠ fy（默认关闭 —— 无人机相机像素为正方形）
+    bool refineFocalPerAxis = false;
 
     // ── 阶段二开关 ────────────────────────────────────────────────
     bool enableTrackCompletion  = true; ///< 是否执行 Complete / Merge
@@ -244,6 +308,7 @@ private:
      * @param minNumInliers 最小内点数
      * @param minInlierRatio 最小内点率
      * @param maxReprojErrorPx RANSAC 阈值与中位误差上限（像素）
+     * @param dist 可选畸变系数（k1,k2,p1,p2,k3）；空表示针孔模型
      * @return 是否成功求解并通过质量校验
      */
     bool resection(const cv::Mat &K,
@@ -253,7 +318,8 @@ private:
                    std::vector<uchar> *outInlierMask = nullptr,
                    int minNumInliers = 30,
                    double minInlierRatio = 0.25,
-                   double maxReprojErrorPx = 12.0);
+                   double maxReprojErrorPx = 12.0,
+                   const cv::Mat &dist = cv::Mat());
 
     // ══════════════════════════════════════════════════════════════════════
     //  阶段二：增量重建子步骤（对应 COLMAP IncrementalMapper 的同名流程）
@@ -333,6 +399,22 @@ private:
     /// 推送当前重建状态（点云 + 已注册相机）
     void emitCurrentState(bool reset);
 
+    /// 各子步骤累计耗时（毫秒）—— 用于定位增量重建的性能瓶颈
+    struct StepTiming
+    {
+        double findNext = 0.0;      ///< FindNextImages（可见点数排名）
+        double triangulate = 0.0;   ///< TriangulateImage
+        double neighbor = 0.0;      ///< FindLocalBundle
+        double localBa = 0.0;       ///< Ceres 局部 BA
+        double merge = 0.0;         ///< MergeTracks
+        double complete = 0.0;      ///< CompleteTracks
+        double completeImg = 0.0;   ///< CompleteImage
+        double filter = 0.0;        ///< FilterPoints3D
+        double emitMs = 0.0;        ///< 点云推送（不能叫 emit：Qt 宏）
+        void reset() { *this = StepTiming(); }
+    };
+    StepTiming m_timing;
+
     /**
      * @brief 基于特征点在多分辨率网格中的分布计算图像权重得分
      *
@@ -368,6 +450,8 @@ private:
 
     std::vector<CameraPose> *m_poses = nullptr;    ///< 指向输出位姿数组
     cv::Mat m_K;                                  ///< 当前内参（自标定后会更新）
+    /// 当前畸变系数（5×1，k1,k2,p1,p2,k3；阶段五 5.2 由全局BA标定，全零=针孔）
+    cv::Mat m_dist;
     std::set<int> m_registeredCameras;
     std::vector<int> m_numRegTrials;              ///< 每张图像的注册尝试次数
     int m_refCameraId = 0;                        ///< 世界坐标系参考相机（种子图1）

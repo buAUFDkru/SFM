@@ -272,7 +272,8 @@ size_t ObservationManager::numTriangulatedMatches(const MatchPair &mp) const
 size_t ObservationManager::filterPoints3D(double maxReprojErrorPx, double minTriAngleDeg,
                                           const std::vector<int> &pointIds,
                                           const std::vector<CameraPose> &poses,
-                                          const cv::Mat &K)
+                                          const cv::Mat &K,
+                                          const cv::Mat &dist)
 {
     size_t numFiltered = 0;
 
@@ -303,7 +304,7 @@ size_t ObservationManager::filterPoints3D(double maxReprojErrorPx, double minTri
                 continue;
             }
             const double err = SfmGeom::reprojectionError(
-                Pw, pose.R, pose.t, K, keypointPos(obs.first, obs.second));
+                Pw, pose.R, pose.t, K, keypointPos(obs.first, obs.second), dist);
             if (err < 0.0 || err > maxReprojErrorPx) {
                 toDelete.emplace_back(obs.first, obs.second);
             }
@@ -370,20 +371,22 @@ size_t ObservationManager::filterPoints3D(double maxReprojErrorPx, double minTri
 
 size_t ObservationManager::filterAllPoints3D(double maxReprojErrorPx, double minTriAngleDeg,
                                              const std::vector<CameraPose> &poses,
-                                             const cv::Mat &K)
+                                             const cv::Mat &K,
+                                             const cv::Mat &dist)
 {
     std::vector<int> ids;
     ids.reserve(m_points.size());
     for (size_t i = 0; i < m_points.size(); ++i) {
         if (m_alive[i]) ids.push_back(static_cast<int>(i));
     }
-    return filterPoints3D(maxReprojErrorPx, minTriAngleDeg, ids, poses, K);
+    return filterPoints3D(maxReprojErrorPx, minTriAngleDeg, ids, poses, K, dist);
 }
 
 size_t ObservationManager::filterPoints3DInImages(double maxReprojErrorPx, double minTriAngleDeg,
                                                   const std::vector<int> &imageIds,
                                                   const std::vector<CameraPose> &poses,
-                                                  const cv::Mat &K)
+                                                  const cv::Mat &K,
+                                                  const cv::Mat &dist)
 {
     std::vector<int> ids;
     std::vector<char> taken(m_points.size(), 0);
@@ -398,7 +401,94 @@ size_t ObservationManager::filterPoints3DInImages(double maxReprojErrorPx, doubl
             }
         }
     }
-    return filterPoints3D(maxReprojErrorPx, minTriAngleDeg, ids, poses, K);
+    return filterPoints3D(maxReprojErrorPx, minTriAngleDeg, ids, poses, K, dist);
+}
+
+size_t ObservationManager::filterShortTracks(size_t minTrackLength)
+{
+    size_t numFiltered = 0;
+    for (size_t i = 0; i < m_points.size(); ++i) {
+        if (!m_alive[i]) continue;
+        if (m_points[i].observations.size() < minTrackLength) {
+            numFiltered += m_points[i].observations.size();
+            deletePoint3D(static_cast<int>(i));
+        }
+    }
+    return numFiltered;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  重建质量统计（阶段四 4.4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+ObservationManager::ReconstructionStats
+ObservationManager::computeStats(const std::vector<CameraPose> &poses,
+                                 const cv::Mat &K,
+                                 const cv::Mat &dist) const
+{
+    ReconstructionStats st;
+    std::vector<double> trackLens;
+    std::vector<double> reprojErrs;
+    std::vector<double> triAngles;
+
+    for (size_t i = 0; i < m_points.size(); ++i) {
+        if (!m_alive[i]) continue;
+        const Point3D &p = m_points[i];
+        ++st.numPoints;
+        st.numObservations += p.observations.size();
+        trackLens.push_back(static_cast<double>(p.observations.size()));
+
+        // 该点所有观测两两视线夹角的最大值（衡量该点几何强度）
+        std::vector<cv::Vec3d> centers;
+        centers.reserve(p.observations.size());
+        for (const auto &obs : p.observations) {
+            if (obs.first < 0 || obs.first >= static_cast<int>(poses.size())) continue;
+            const CameraPose &pose = poses[static_cast<size_t>(obs.first)];
+            if (!pose.registered || pose.R.empty() || pose.t.empty()) continue;
+            centers.push_back(SfmGeom::cameraCenter(pose.R, pose.t));
+        }
+        if (centers.size() >= 2) {
+            double bestAngle = 0.0;
+            for (size_t a = 0; a < centers.size(); ++a) {
+                for (size_t b = a + 1; b < centers.size(); ++b) {
+                    bestAngle = std::max(bestAngle,
+                                         SfmGeom::triangulationAngleDeg(
+                                             cv::Vec3d(p.position.x, p.position.y, p.position.z),
+                                             centers[a], centers[b]));
+                }
+            }
+            triAngles.push_back(bestAngle);
+        }
+
+        for (const auto &obs : p.observations) {
+            if (obs.first < 0 || obs.first >= static_cast<int>(poses.size())) continue;
+            const CameraPose &pose = poses[static_cast<size_t>(obs.first)];
+            if (!pose.registered || pose.R.empty() || pose.t.empty()) continue;
+            const double err = SfmGeom::reprojectionError(
+                cv::Vec3d(p.position.x, p.position.y, p.position.z),
+                pose.R, pose.t, K, keypointPos(obs.first, obs.second), dist);
+            if (err < 0.0) {
+                ++st.numBehindCamera;
+                continue;
+            }
+            reprojErrs.push_back(err);
+        }
+    }
+
+    auto meanOf = [](const std::vector<double> &v) {
+        if (v.empty()) return 0.0;
+        double s = 0.0;
+        for (const double x : v) s += x;
+        return s / static_cast<double>(v.size());
+    };
+
+    st.meanTrackLength = meanOf(trackLens);
+    st.medianTrackLength = SfmGeom::medianOf(trackLens);
+    st.meanReprojErrorPx = meanOf(reprojErrs);
+    st.medianReprojErrorPx = SfmGeom::medianOf(reprojErrs);
+    st.meanTriAngleDeg = meanOf(triAngles);
+    st.medianTriAngleDeg = SfmGeom::medianOf(triAngles);
+    return st;
 }
 
 void ObservationManager::compact(std::vector<Point3D> &outPoints,

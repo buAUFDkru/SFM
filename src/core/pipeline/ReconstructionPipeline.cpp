@@ -5,9 +5,11 @@
 #include "algorithm/Initialization.h"
 #include "algorithm/MatcherService.h"
 #include "algorithm/PointCloudBuilder.h"
+#include "algorithm/SfmGeometry.h"
 #include "algorithm/SfmLogger.h"
 #include "algorithm/ThreadPool.h"
 #include "algorithm/Triangulate.h"
+#include "data/ExifReader.h"
 #include "pipeline/DenseReconstructionFactory.h"
 #include "pipeline/IDenseReconstructor.h"
 #include "plugin/IDescriptorPlugin.h"
@@ -254,9 +256,43 @@ ReconstructionOutput ReconstructionPipeline::execute()
     // =====================================================================
     // 内参优先在匹配前确定：阶段三的两视图几何在已知 K 时会直接估本质矩阵 E，
     // 精度优于「先估 F 再算 E = KᵀFK」，且能顺带判定 PLANAR / PANORAMIC 退化。
-    cv::Mat K = m_config.cameraMatrix.empty()
-                ? Triangulate::instance()->estimateK(m_features)
-                : m_config.cameraMatrix.clone();
+    // ── 阶段五 5.1：内参初值优先级 = 外部提供 > EXIF 焦距 > 60°FOV 估计 ────
+    // 同一次 EXIF 扫描同时产出 5.3 的相机分组信息，避免重复读盘。
+    cv::Mat K;
+    SfmExif::IntrinsicsGuess exifInfo;
+    if (m_config.useExifFocal) {
+        exifInfo = SfmExif::estimateFromExif(m_config.imageFiles, m_features);
+    }
+
+    if (!m_config.cameraMatrix.empty()) {
+        K = m_config.cameraMatrix.clone();
+    } else if (exifInfo.valid) {
+        K = exifInfo.K.clone();
+        log(QString("[EXIF焦距] 采用EXIF内参初值: f=%1px (35mm等效 %2mm, "
+                    "%3/%4 张图含EXIF, 离散度 %5~%6px), 主点=(%7,%8)")
+                .arg(exifInfo.focalPx, 0, 'f', 1)
+                .arg(exifInfo.focal35Mm, 0, 'f', 1)
+                .arg(exifInfo.numWithExif).arg(exifInfo.numImages)
+                .arg(exifInfo.focalPxMin, 0, 'f', 1)
+                .arg(exifInfo.focalPxMax, 0, 'f', 1)
+                .arg(exifInfo.K.at<double>(0, 2), 0, 'f', 1)
+                .arg(exifInfo.K.at<double>(1, 2), 0, 'f', 1));
+    } else {
+        if (m_config.useExifFocal && !exifInfo.reason.isEmpty()) {
+            log(QString("[EXIF焦距] 不可用（%1），回落到按图像尺寸估计 K")
+                    .arg(exifInfo.reason));
+        }
+        K = Triangulate::instance()->estimateK(m_features);
+    }
+
+    // ── 阶段五 5.3：相机分组识别（同组共享内参，多组时提示）─────────────────
+    if (exifInfo.numGroups == 1) {
+        log(QString("[相机分组] 全部图像属于同一相机组: %1").arg(exifInfo.dominantGroup));
+    } else if (exifInfo.numGroups > 1) {
+        log(QString("[相机分组] 识别到 %1 个相机分组，主导组: %2"
+                    "（内参当前仍按共享一组优化）")
+                .arg(exifInfo.numGroups).arg(exifInfo.dominantGroup));
+    }
 
     log("-------- [阶段 2/6] 特征匹配 开始 --------");
     setProgress("特征匹配", 0);
@@ -278,6 +314,26 @@ ReconstructionOutput ReconstructionPipeline::execute()
         .arg(matchPairs.size())
         .arg(stageTimer.elapsed() / 1000.0, 0, 'f', 1));
     log("-------- [阶段 2/6] 特征匹配 完成 --------");
+
+    // ── 阶段四 4.5：视图图连通分量分析 ────────────────────────────────────
+    // 匹配图不连通时，各分量之间没有任何共视约束，位姿与尺度无法关联到同一
+    // 坐标系（COLMAP 的处理是输出多个独立 model）。这里保留最大分量内部的
+    // 匹配边，把重建限制在最大分量上；孤立图像（无任何匹配边）单独计数。
+    int mainCompSize = static_cast<int>(m_features.size());
+    {
+        const SfmGeom::LargestComponentResult comp =
+            SfmGeom::keepLargestComponent(matchPairs, static_cast<int>(m_features.size()));
+        mainCompSize = comp.mainSize;
+        if (comp.numComponents > 1) {
+            log(QString("[视图图] 匹配图不连通: %1 个分量, 最大分量 %2/%3 张图, "
+                        "剔除跨分量匹配对 %4 条, 孤立图像 %5 张")
+                    .arg(comp.numComponents).arg(comp.mainSize)
+                    .arg(m_features.size())
+                    .arg(static_cast<qlonglong>(comp.removedPairs))
+                    .arg(comp.isolatedImages));
+            log("[视图图] 仅在最大连通分量上重建（小分量无法关联到主模型坐标系）");
+        }
+    }
 
     if (!m_config.cameraMatrix.empty()) {
         log(QString("[内参矩阵] 使用外部提供的K: fx=%1 fy=%2 cx=%3 cy=%4")
@@ -315,8 +371,25 @@ ReconstructionOutput ReconstructionPipeline::execute()
     setProgress("稀疏重建", 0);
     stageTimer.restart();
 
+    // ── 阶段五 5.2/5.3：把相机模型选项透传给稀疏重建 ──────────────────────
+    {
+        TriangulateOptions triOpt = Triangulate::instance()->options();
+        triOpt.refineDistortion    = m_config.refineDistortion;
+        triOpt.refineFocalPerAxis  = m_config.refineFocalPerAxis;
+        // 只有 EXIF 反推出焦距才「可信」到值得在种子对阶段锁住它
+        triOpt.intrinsicsTrusted   = exifInfo.valid;
+        Triangulate::instance()->setOptions(triOpt);
+        log(QString("[相机模型] 畸变精化=%1, fx≠fy=%2, EXIF焦距初值=%3")
+                .arg(triOpt.refineDistortion ? "开" : "关")
+                .arg(triOpt.refineFocalPerAxis ? "开" : "关")
+                .arg(triOpt.intrinsicsTrusted ? "是（内参已锁）" : "否（锁内参禁用）"));
+    }
+
     const int numImagesAll = static_cast<int>(m_features.size());
-    const int acceptRegCount = std::max(3, static_cast<int>(0.9 * numImagesAll));
+    // 短路门槛 = 主分量全部图像：未注册满时跑完所有种子对候选取最优。
+    // 若用 0.9 这类宽松门槛，「第一组侥幸达标但质量差」的次优结果会被提前接受
+    //（data 实测：26/28 提前短路 vs 继续尝试可得 28/28 与约 3 倍点数）。
+    const int acceptRegCount = std::max(3, mainCompSize);
 
     std::vector<Point3D> sparsePoints;
     std::vector<CameraPose> cameraPoses;
@@ -340,8 +413,9 @@ ReconstructionOutput ReconstructionPipeline::execute()
             if (p.registered) ++regCount;
         }
 
-        log(QString("[稀疏重建] 第 %1 次尝试: 注册相机 %2/%3, 三维点 %4")
-                .arg(t + 1).arg(regCount).arg(numImagesAll).arg(ptsTry.size()));
+        log(QString("[稀疏重建] 第 %1 次尝试: 注册相机 %2/%3 (主分量 %4), 三维点 %5")
+                .arg(t + 1).arg(regCount).arg(numImagesAll).arg(mainCompSize)
+                .arg(ptsTry.size()));
 
         if (okTry && regCount > 0) {
             const bool better = (regCount > bestRegCount) ||

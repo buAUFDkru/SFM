@@ -231,7 +231,8 @@ bool Triangulate::resection(const cv::Mat &K,
                             std::vector<uchar> *outInlierMask,
                             int minNumInliers,
                             double minInlierRatio,
-                            double maxReprojErrorPx)
+                            double maxReprojErrorPx,
+                            const cv::Mat &dist)
 {
     const size_t n = imgPts.size();
     if (n != pts3d.size() || n < 4) {
@@ -241,7 +242,10 @@ bool Triangulate::resection(const cv::Mat &K,
         return false;
     }
 
-    const cv::Mat distCoeffs = cv::Mat::zeros(5, 1, CV_64F);
+    // 阶段五 5.2：畸变一旦在全局BA中被标定出来，PnP 就必须按带畸变模型求解，
+    // 否则新相机的位姿会被系统性拉偏（OpenCV 直接支持畸变系数）。
+    const cv::Mat distCoeffs = dist.empty() ? cv::Mat::zeros(5, 1, CV_64F)
+                                            : dist.clone();
     const float ransacErr = static_cast<float>(std::max(1.0, maxReprojErrorPx));
 
     std::vector<int> inliers;
@@ -400,7 +404,8 @@ bool Triangulate::registerNextImage(int imageId)
                               pts2d, pts3d, rvec, tvec, &inlierMask,
                               m_options.absPoseMinNumInliers,
                               m_options.absPoseMinInlierRatio,
-                              m_options.absPoseMaxErrorPx);
+                              m_options.absPoseMaxErrorPx,
+                              m_dist);
     if (!ok) return false;
 
     cv::Mat Rnew;
@@ -427,14 +432,37 @@ bool Triangulate::registerNextImage(int imageId)
 
 void Triangulate::triangulateAndRefineImage(int imageId)
 {
+    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     const size_t numTris = m_triangulator->triangulateImage(m_triOptions, imageId);
+    const std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+    m_timing.triangulate += std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     qDebug().noquote()
         << QString("[三角化] 图像 #%1 新增/续接观测=%2，当前三维点=%3")
                .arg(imageId).arg(static_cast<qlonglong>(numTris))
                .arg(static_cast<qlonglong>(m_obs->numAlivePoints()));
 
     iterativeLocalRefinement(imageId);
+    const std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
+
     emitCurrentState(true);
+    const std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
+    m_timing.emitMs += std::chrono::duration<double, std::milli>(t3 - t2).count();
+
+    qDebug().noquote()
+        << QString("[图像耗时] #%1 选图=%2 三角化=%3 局部精化=%4 (邻域%5 BA%6 合并%7 补全%8 补图%9 过滤%10) 推送=%11 ms")
+               .arg(imageId)
+               .arg(m_timing.findNext, 0, 'f', 0)
+               .arg(m_timing.triangulate, 0, 'f', 0)
+               .arg(std::chrono::duration<double, std::milli>(t2 - t1).count(), 0, 'f', 0)
+               .arg(m_timing.neighbor, 0, 'f', 0)
+               .arg(m_timing.localBa, 0, 'f', 0)
+               .arg(m_timing.merge, 0, 'f', 0)
+               .arg(m_timing.complete, 0, 'f', 0)
+               .arg(m_timing.completeImg, 0, 'f', 0)
+               .arg(m_timing.filter, 0, 'f', 0)
+               .arg(m_timing.emitMs, 0, 'f', 0);
+    m_timing.reset();
 }
 
 void Triangulate::iterativeLocalRefinement(int imageId)
@@ -567,7 +595,10 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
     m_lastLocalResiduals = 0;
 
     std::vector<int> localImages;
+    const std::chrono::steady_clock::time_point tN0 = std::chrono::steady_clock::now();
     findLocalBundle(imageId, localImages);
+    m_timing.neighbor +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tN0).count();
 
     const std::set<int> imageSet(localImages.begin(), localImages.end());
 
@@ -605,11 +636,15 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
         pointVariable[static_cast<size_t>(pid)] = 1;
     }
 
+    const std::chrono::steady_clock::time_point tBa = std::chrono::steady_clock::now();
     BundleAdjustment::instance()->localBundleAdjustment(
         cameras, pointsArr, observations,
         m_K.at<double>(0, 0), m_K.at<double>(1, 1),
         m_K.at<double>(0, 2), m_K.at<double>(1, 2),
-        cameraVariable, pointVariable, m_refCameraId);
+        cameraVariable, pointVariable, m_refCameraId,
+        m_options.baLocalMaxIterations);
+    m_timing.localBa +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tBa).count();
 
     applyCameraParams(cameras, cameraVariable);
     applyPointParams(pointsArr);
@@ -619,9 +654,18 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
     m_lastLocalResiduals = observations.size();
 
     if (m_options.enableTrackCompletion) {
+        const auto tA = std::chrono::steady_clock::now();
         const size_t merged = m_triangulator->mergeTracks(m_triOptions, variablePointIds);
+        const auto tB = std::chrono::steady_clock::now();
         const size_t completed = m_triangulator->completeTracks(m_triOptions, variablePointIds);
+        const auto tC = std::chrono::steady_clock::now();
         const size_t completedImg = m_triangulator->completeImage(m_triOptions, imageId);
+        const auto tD = std::chrono::steady_clock::now();
+
+        m_timing.merge += std::chrono::duration<double, std::milli>(tB - tA).count();
+        m_timing.complete += std::chrono::duration<double, std::milli>(tC - tB).count();
+        m_timing.completeImg += std::chrono::duration<double, std::milli>(tD - tC).count();
+
         qDebug().noquote()
             << QString("[局部精化] 图像#%1: 合并=%2, 补全=%3, 补图=%4")
                    .arg(imageId)
@@ -630,12 +674,15 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
                    .arg(static_cast<qlonglong>(completedImg));
     }
 
+    const auto tF0 = std::chrono::steady_clock::now();
     const size_t filtered = m_obs->filterPoints3D(
         m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
-        variablePointIds, *m_poses, m_K);
+        variablePointIds, *m_poses, m_K, m_dist);
     const size_t filteredImg = m_obs->filterPoints3DInImages(
         m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
-        localImages, *m_poses, m_K);
+        localImages, *m_poses, m_K, m_dist);
+    m_timing.filter +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tF0).count();
 
     m_lastLocalChanged = filtered + filteredImg;
     Q_UNUSED(changed);
@@ -670,9 +717,28 @@ void Triangulate::runGlobalBundleAdjustment(bool fixIntrinsics)
                .arg(static_cast<qlonglong>(m_obs->numAlivePoints()))
                .arg(observations.size());
 
+    // ── 阶段五 5.2/5.3：内参精化选项 ──────────────────────────────────────
+    // 种子对阶段（2 台相机）焦距与主点/场景尺度不可辨识，内参一律钉死；
+    // 注册相机数达到 intrinsicsMinCameras 后才放开焦距与畸变。
+    const int minCam = m_options.intrinsicsTrusted ? m_options.intrinsicsMinCameras : 0;
+    const bool canRefineIntrinsics =
+        static_cast<int>(m_registeredCameras.size()) >= minCam;
+
+    BAIntrinsicsOptions intrOpts;
+    intrOpts.refineFocalLength = canRefineIntrinsics;
+    intrOpts.refineFocalPerAxis = m_options.refineFocalPerAxis && canRefineIntrinsics;
+    intrOpts.refineDistortion = m_options.refineDistortion && canRefineIntrinsics;
+    if (!m_dist.empty()) {
+        intrOpts.k1 = m_dist.at<double>(0);
+        intrOpts.k2 = m_dist.at<double>(1);
+        intrOpts.p1 = m_dist.at<double>(2);
+        intrOpts.p2 = m_dist.at<double>(3);
+    }
+
     BundleAdjustment::instance()->globalBundleAdjustment(
         cameras, pointsArr, observations, fx, fy, cx, cy,
-        fixIntrinsics, m_refCameraId, &cameraVariable);
+        fixIntrinsics, m_refCameraId, &cameraVariable,
+        m_options.baGlobalMaxIterations, &intrOpts);
 
     applyCameraParams(cameras, cameraVariable);
     applyPointParams(pointsArr);
@@ -681,10 +747,22 @@ void Triangulate::runGlobalBundleAdjustment(bool fixIntrinsics)
     m_K.at<double>(1, 1) = fy;
     m_K.at<double>(0, 2) = cx;
     m_K.at<double>(1, 2) = cy;
+
+    // 畸变回写：参与后续过滤 / 三角化 / PnP / 统计的投影模型
+    if (m_options.refineDistortion && canRefineIntrinsics) {
+        m_dist.at<double>(0) = intrOpts.k1;
+        m_dist.at<double>(1) = intrOpts.k2;
+        m_dist.at<double>(2) = intrOpts.p1;
+        m_dist.at<double>(3) = intrOpts.p2;
+        m_dist.at<double>(4) = 0.0;   // k3 固定为 0（与 k1/k2 强相关）
+    }
+
     for (auto &pose : *m_poses) {
         pose.K = m_K.clone();
+        pose.distortion = m_dist.clone();
     }
     m_triangulator->setK(m_K);
+    m_triangulator->setDistortion(m_dist);
 }
 
 size_t Triangulate::completeAndMergeTracks()
@@ -775,6 +853,9 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
     m_features = &features;
     m_poses = &outCameraPoses;
 
+    // ── 阶段五 5.2：畸变状态初始化（全零 = 针孔模型）─────────────────────
+    m_dist = cv::Mat::zeros(5, 1, CV_64F);
+
     outCameraPoses.assign(static_cast<size_t>(numImages), CameraPose());
     for (int c = 0; c < numImages; ++c) {
         CameraPose &pose = outCameraPoses[static_cast<size_t>(c)];
@@ -782,7 +863,7 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
         pose.imageWidth = features[static_cast<size_t>(c)].imageWidth;
         pose.imageHeight = features[static_cast<size_t>(c)].imageHeight;
         pose.K = m_K.clone();
-        pose.distortion = cv::Mat::zeros(5, 1, CV_64F);
+        pose.distortion = m_dist.clone();
         pose.registered = false;
     }
     m_numRegTrials.assign(static_cast<size_t>(numImages), 0);
@@ -888,7 +969,7 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
     runGlobalBundleAdjustment(fixIntrinsics);
     m_obs->filterAllPoints3D(m_options.initialFilterMaxReprojErrorPx,
                              m_options.filterMinTriAngleDeg,
-                             outCameraPoses, m_K);
+                             outCameraPoses, m_K, m_dist);
     if (m_obs->numAlivePoints() == 0) {
         qDebug().noquote() << "[三角测量] 初始全局BA后无有效三维点，重建失败";
         return false;
@@ -898,7 +979,10 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
     //  增量注册主循环
     // ═══════════════════════════════════════════════════════════════════════
     while (true) {
+        const auto tF = std::chrono::steady_clock::now();
         const std::vector<std::pair<int, int>> ranked = findNextImages();
+        m_timing.findNext +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tF).count();
         if (ranked.empty()) {
             qDebug().noquote() << "[三角测量] 无更多可注册图像";
             break;
@@ -930,15 +1014,23 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
     //  收尾：补全/合并 → 重三角化 → 迭代全局BA
     // ═══════════════════════════════════════════════════════════════════════
     if (m_options.enableTrackCompletion) {
+        const auto tS = std::chrono::steady_clock::now();
         const size_t changed = completeAndMergeTracks();
         qDebug().noquote()
-            << QString("[收尾] 补全+合并观测=%1").arg(static_cast<qlonglong>(changed));
+            << QString("[收尾] 补全+合并观测=%1 (%2 ms)")
+                   .arg(static_cast<qlonglong>(changed))
+                   .arg(std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - tS).count(), 0, 'f', 0);
     }
 
     if (m_options.enableRetriangulation) {
+        const auto tS = std::chrono::steady_clock::now();
         const size_t numRe = m_triangulator->retriangulate(m_triOptions, matchPairs);
         qDebug().noquote()
-            << QString("[收尾] 重三角化观测=%1").arg(static_cast<qlonglong>(numRe));
+            << QString("[收尾] 重三角化观测=%1 (%2 ms)")
+                   .arg(static_cast<qlonglong>(numRe))
+                   .arg(std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - tS).count(), 0, 'f', 0);
     }
 
     for (int iter = 0; iter < m_options.globalMaxRefinements; ++iter) {
@@ -950,7 +1042,7 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
         size_t changed = m_options.enableTrackCompletion ? completeAndMergeTracks() : 0;
         changed += m_obs->filterAllPoints3D(m_options.filterMaxReprojErrorPx,
                                             m_options.filterMinTriAngleDeg,
-                                            outCameraPoses, m_K);
+                                            outCameraPoses, m_K, m_dist);
 
         const double ratio = static_cast<double>(changed) /
                              static_cast<double>(std::max<size_t>(1, numObsBefore));
@@ -964,6 +1056,65 @@ bool Triangulate::triangulate(const std::vector<MatchPair> &matchPairs,
         if (ratio < m_options.globalMaxRefinementChange) break;
     }
     m_triangulator->clearModified();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  阶段四 4.4：末尾滤波兜底（4px / 1.5° / 短轨迹）
+    //  迭代全局精化每轮已含 filterAllPoints3D，这里再做一次兜底：
+    //  1) 保证滤波是最后一步（补全/合并不会在滤波之后残留新观测）
+    //  2) 显式执行可配置的短轨迹剔除（filterMinTrackLength）
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+        const size_t filteredFinal = m_obs->filterAllPoints3D(
+            m_options.filterMaxReprojErrorPx, m_options.filterMinTriAngleDeg,
+            outCameraPoses, m_K, m_dist);
+        const size_t filteredShort =
+            m_obs->filterShortTracks(m_options.filterMinTrackLength);
+        if (filteredFinal + filteredShort > 0) {
+            qDebug().noquote()
+                << QString("[末尾滤波] 外点=%1, 短轨迹(<%2观测)=%3")
+                       .arg(static_cast<qlonglong>(filteredFinal))
+                       .arg(static_cast<qlonglong>(m_options.filterMinTrackLength))
+                       .arg(static_cast<qlonglong>(filteredShort));
+        }
+    }
+
+    // ── 阶段四 4.6：场景归一化（相似变换，不改重投影误差）─────────────────
+    if (m_options.enableSceneNormalization) {
+        std::vector<Point3D> normalized;
+        std::vector<int> idMap;
+        m_obs->compact(normalized, &idMap);
+        SfmGeom::normalizeScene(normalized, outCameraPoses,
+                                m_options.sceneNormalizationExtent);
+        for (size_t oldId = 0; oldId < idMap.size(); ++oldId) {
+            if (idMap[oldId] >= 0) {
+                m_obs->point(static_cast<int>(oldId)).position =
+                    normalized[static_cast<size_t>(idMap[oldId])].position;
+            }
+        }
+        qDebug().noquote()
+            << QString("[场景归一化] 相机平均光心距 → %1, 质心 → 原点")
+                   .arg(m_options.sceneNormalizationExtent, 0, 'f', 1);
+    }
+
+    // ── 重建质量统计（对齐优化方案「验证方法」指标清单）───────────────────
+    {
+        const auto st = m_obs->computeStats(outCameraPoses, m_K, m_dist);
+        qDebug().noquote()
+            << QString("[重建统计] 相机=%1/%2, 点=%3, 观测=%4 | "
+                       "轨迹长: 均值=%5 中位=%6 | "
+                       "重投影: 均值=%7px 中位=%8px 后方=%9 | "
+                       "三角化角: 均值=%10° 中位=%11°")
+                   .arg(m_registeredCameras.size()).arg(numImages)
+                   .arg(static_cast<qlonglong>(st.numPoints))
+                   .arg(static_cast<qlonglong>(st.numObservations))
+                   .arg(st.meanTrackLength, 0, 'f', 2)
+                   .arg(st.medianTrackLength, 0, 'f', 1)
+                   .arg(st.meanReprojErrorPx, 0, 'f', 2)
+                   .arg(st.medianReprojErrorPx, 0, 'f', 2)
+                   .arg(static_cast<qlonglong>(st.numBehindCamera))
+                   .arg(st.meanTriAngleDeg, 0, 'f', 1)
+                   .arg(st.medianTriAngleDeg, 0, 'f', 1);
+    }
 
     // ── 输出 ──────────────────────────────────────────────────────────────
     m_obs->compact(outPoints3D);

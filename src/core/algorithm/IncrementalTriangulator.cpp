@@ -176,7 +176,8 @@ bool IncrementalTriangulator::estimateTriangulation(const std::vector<CorrData> 
         if (!pose.registered || pose.R.empty() || pose.t.empty()) return false;
 
         P[i] = projectionMatrix(pose.R, pose.t);
-        xy[i] = SfmGeom::toNormalized(corrs[i].xy, *m_K);
+        // 阶段五 5.2：有畸变时观测必须先去畸变，否则射线方向是弯的
+        xy[i] = SfmGeom::toNormalized(corrs[i].xy, *m_K, m_dist);
         centers[i] = SfmGeom::cameraCenter(pose.R, pose.t);
     }
 
@@ -194,8 +195,8 @@ bool IncrementalTriangulator::estimateTriangulation(const std::vector<CorrData> 
         for (size_t i = 0; i < n; ++i) {
             const CameraPose &pose = (*m_poses)[static_cast<size_t>(corrs[i].imageId)];
             const double err = errorIsPixel
-                ? SfmGeom::reprojectionError(Pw, pose.R, pose.t, *m_K, corrs[i].xy)
-                : SfmGeom::angularErrorDeg(corrs[i].xy, Pw, pose.R, pose.t, *m_K);
+                ? SfmGeom::reprojectionError(Pw, pose.R, pose.t, *m_K, corrs[i].xy, m_dist)
+                : SfmGeom::angularErrorDeg(corrs[i].xy, Pw, pose.R, pose.t, *m_K, m_dist);
 
             if (err >= 0.0 && err <= maxError) {
                 mask[i] = 1;
@@ -342,7 +343,7 @@ size_t IncrementalTriangulator::continueTrack(const TriangulatorOptions &options
 
         const double err = SfmGeom::angularErrorDeg(
             ref.xy, cv::Vec3d(p.position.x, p.position.y, p.position.z),
-            pose.R, pose.t, *m_K);
+            pose.R, pose.t, *m_K, m_dist);
 
         if (err < bestError) {
             bestError = err;
@@ -391,7 +392,8 @@ size_t IncrementalTriangulator::complete(const TriangulatorOptions &options, int
                 if (m_obs->pointIdAt(c.first, c.second) >= 0) continue;
 
                 const double err = SfmGeom::reprojectionError(
-                    Pw, pose.R, pose.t, *m_K, m_obs->keypointPos(c.first, c.second));
+                    Pw, pose.R, pose.t, *m_K, m_obs->keypointPos(c.first, c.second),
+                    m_dist);
                 if (err < 0.0 || err > options.completeMaxReprojErrorPx) continue;
 
                 if (!m_obs->exists(pointId)) return numCompleted;
@@ -453,7 +455,8 @@ size_t IncrementalTriangulator::merge(const TriangulatorOptions &options, int po
                     const CameraPose &pose = (*m_poses)[static_cast<size_t>(obs.first)];
                     if (!pose.registered || pose.R.empty() || pose.t.empty()) { ok = false; break; }
                     const double err = SfmGeom::reprojectionError(
-                        merged, pose.R, pose.t, *m_K, m_obs->keypointPos(obs.first, obs.second));
+                        merged, pose.R, pose.t, *m_K,
+                        m_obs->keypointPos(obs.first, obs.second), m_dist);
                     if (err < 0.0 || err * err > maxSqErr) { ok = false; break; }
                 }
                 if (!ok) break;

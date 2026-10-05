@@ -12,7 +12,11 @@
 #include "CorrespondenceGraph.h"
 
 #include <algorithm>
+#include <climits>
 #include <numeric>
+
+#include <QDebug>
+#include <QString>
 
 void CorrespondenceGraph::build(const std::vector<MatchPair> &matchPairs,
                                 const std::vector<int> &numKeypointsPerImage)
@@ -78,6 +82,30 @@ void CorrespondenceGraph::build(const std::vector<MatchPair> &matchPairs,
             m_tracks[static_cast<size_t>(comp)].emplace_back(img, n - begin);
         }
     }
+
+    // ── 规模诊断：并查集在高重叠数据上会形成巨型连通块 ────────────────────
+    size_t maxSize = 0;
+    size_t sumSize = 0;
+    size_t multiImage = 0;   // 含「同一张图多个观测」的轨迹数
+    for (const auto &track : m_tracks) {
+        maxSize = std::max(maxSize, track.size());
+        sumSize += track.size();
+        if (track.size() > static_cast<size_t>(m_numImages)) ++multiImage;
+    }
+    m_imgSeen.assign(static_cast<size_t>(m_numImages), 0);
+    m_visitStamp.assign(static_cast<size_t>(numNodes), 0);
+    m_visitEpoch = 0;
+
+    qDebug().noquote()
+        << QString("[对应图] 节点=%1, 轨迹=%2, 最大轨迹=%3, 平均=%4, 超长轨迹(>%5)=%6")
+               .arg(numNodes)
+               .arg(static_cast<qlonglong>(m_tracks.size()))
+               .arg(static_cast<qlonglong>(maxSize))
+               .arg(m_tracks.empty() ? 0.0
+                                     : static_cast<double>(sumSize) /
+                                           static_cast<double>(m_tracks.size()), 0, 'f', 2)
+               .arg(m_numImages)
+               .arg(static_cast<qlonglong>(multiImage));
 }
 
 bool CorrespondenceGraph::hasCorrespondences(int imageId, int kptIdx) const
@@ -97,9 +125,21 @@ void CorrespondenceGraph::findCorrespondences(int imageId, int kptIdx,
     if (!hasCorrespondences(imageId, kptIdx)) return;
 
     const auto &track = m_tracks[static_cast<size_t>(m_compId[static_cast<size_t>(nodeId(imageId, kptIdx))])];
-    out->reserve(track.size());
+
+    // 一张图至多贡献一个观测（详见头文件注释）：候选集上界 = 图像数，
+    // 巨型连通块下也不会把三角化/补全拖成 O(T^2)~O(T^3)。
+    if (m_imgSeen.size() != static_cast<size_t>(m_numImages)) {
+        m_imgSeen.assign(static_cast<size_t>(m_numImages), 0);
+    }
+    std::fill(m_imgSeen.begin(), m_imgSeen.end(), 0);
+
+    out->reserve(std::min<size_t>(track.size(), static_cast<size_t>(m_numImages)));
     for (const auto &obs : track) {
-        if (obs.first != imageId) out->push_back(obs);
+        if (obs.first == imageId) continue;
+        if (obs.first < 0 || obs.first >= m_numImages) continue;
+        if (m_imgSeen[static_cast<size_t>(obs.first)]) continue;
+        m_imgSeen[static_cast<size_t>(obs.first)] = 1;
+        out->push_back(obs);
     }
 }
 
@@ -114,28 +154,36 @@ void CorrespondenceGraph::extractTransitiveCorrespondences(
     out->clear();
     if (!hasCorrespondences(imageId, kptIdx)) return;
 
-    // 与 COLMAP 一致：BFS 按「层」扩展，每层只扩展上一层新加入的观测
+    // 与 COLMAP 一致：BFS 按「层」扩展，每层只扩展上一层新加入的观测。
+    // 访问标记用 epoch 递增的整型数组（O(1)），旧实现用 vector 线性扫描，
+    // 单次查询是 O(V^2)，大轨迹上同样会退化。
+    if (m_visitStamp.size() != static_cast<size_t>(m_offset[static_cast<size_t>(m_numImages)])) {
+        m_visitStamp.assign(static_cast<size_t>(m_offset[static_cast<size_t>(m_numImages)]), 0);
+        m_visitEpoch = 0;
+    }
+    if (m_visitEpoch >= INT_MAX) {
+        std::fill(m_visitStamp.begin(), m_visitStamp.end(), 0);
+        m_visitEpoch = 0;
+    }
+    ++m_visitEpoch;
+    const int epoch = m_visitEpoch;
+
     std::vector<Observation> level;
     level.emplace_back(imageId, kptIdx);
-
-    std::vector<std::pair<int, int>> visited;
-    visited.emplace_back(imageId, kptIdx);
+    m_visitStamp[static_cast<size_t>(nodeId(imageId, kptIdx))] = epoch;
 
     std::vector<Observation> scratch;
 
     for (int t = 0; t < transitivity; ++t) {
         std::vector<Observation> nextLevel;
-        scratch.clear();
 
         for (const auto &ref : level) {
+            scratch.clear();
             findCorrespondences(ref.first, ref.second, &scratch);
             for (const auto &c : scratch) {
-                bool seen = false;
-                for (const auto &v : visited) {
-                    if (v.first == c.first && v.second == c.second) { seen = true; break; }
-                }
-                if (seen) continue;
-                visited.push_back(c);
+                int &stamp = m_visitStamp[static_cast<size_t>(nodeId(c.first, c.second))];
+                if (stamp == epoch) continue;
+                stamp = epoch;
                 out->push_back(c);
                 nextLevel.push_back(c);
             }

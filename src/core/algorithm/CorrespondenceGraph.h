@@ -58,7 +58,18 @@ public:
     /**
      * @brief 直接对应（transitivity = 1）
      *
-     * 同一条轨迹中来自**其它图像**的所有观测（不含查询观测自身）。
+     * 同一条轨迹中来自**其它图像**的所有观测，且**每张图像至多一个**。
+     *
+     * ### 为什么要按图像去重
+     *
+     * 并查集把匹配图做了完整传递闭包，在高重叠数据（如 28 张无人机图、
+     * 32.9 万条匹配边 vs 22 万个关键点，边/点 > 2）上会出现「巨型连通块」：
+     * 同一条轨迹里可能塞进同一张图的几十个关键点。若整条返回：
+     * - 候选集膨胀到上千，TriangulateImage / Complete 的三角化与补全退化到
+     *   O(T^2)~O(T^3)（实测单张图卡住 50 分钟以上）
+     * - 一条轨迹出现同一张图的多个观测，本身就是非法的（一个三维点在
+     *   一张图上至多有一个投影）
+     * 去重后候选集上界 = 图像数，代价降为 O(T)。
      */
     void findCorrespondences(int imageId, int kptIdx,
                              std::vector<Observation> *out) const;
@@ -92,6 +103,12 @@ private:
     mutable std::vector<int> m_parent;             ///< 并查集父节点（const 查询时做路径压缩）
     std::vector<int> m_compId;                     ///< node → 轨迹号；< 0 表示孤立点
     std::vector<std::vector<Observation>> m_tracks;///< 轨迹号 → 观测列表
+
+    /// findCorrespondences 去重用的「本轮已见图像」标记（避免每次查询都分配）
+    mutable std::vector<char> m_imgSeen;
+    /// extractTransitiveCorrespondences 的 BFS 访问标记（epoch 递增，避免每次清零）
+    mutable std::vector<int> m_visitStamp;
+    mutable int m_visitEpoch = 0;
 
     int nodeId(int imageId, int kptIdx) const
     {

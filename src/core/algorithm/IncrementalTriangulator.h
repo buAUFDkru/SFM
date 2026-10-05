@@ -73,6 +73,10 @@ public:
     void setK(const cv::Mat &K) { m_K = &K; }
     const cv::Mat &K() const { return *m_K; }
 
+    /// 阶段五 5.2：更新畸变系数（外部持有；全零表示针孔模型）
+    void setDistortion(const cv::Mat &dist) { m_dist = dist.empty() ? cv::Mat() : dist.clone(); }
+    const cv::Mat &distortion() const { return m_dist; }
+
     /**
      * @brief 三角化某张已注册图像上的所有观测（COLMAP TriangulateImage）
      * @return 新增/续接的观测条数
@@ -178,6 +182,7 @@ private:
     const std::vector<FeatureResult> *m_features = nullptr;
     std::vector<CameraPose> *m_poses = nullptr;
     const cv::Mat *m_K = nullptr;
+    cv::Mat m_dist;                  ///< 畸变系数（5×1；全零/空 = 针孔模型）
 
     std::set<int> m_modified;                    ///< 本轮新建/修改的点
     Stats m_stats;                               ///< 建点失败原因统计（诊断用）

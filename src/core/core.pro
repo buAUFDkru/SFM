@@ -23,6 +23,7 @@ HEADERS += \
     builtin/BuiltinMatchers.h \
     builtin/registerBuiltIn.h \
     data/SfmTypes.h \
+    data/ExifReader.h \
     data/ReconstructionOutput.h \
     data/StereoTypes.h \
     algorithm/ThreadPool.h \
@@ -50,6 +51,7 @@ HEADERS += \
 
 SOURCES += \
     plugin/PluginRegistry.cpp \
+    data/ExifReader.cpp \
     builtin/BuiltinDescriptors.cpp \
     builtin/BuiltinMatchers.cpp \
     builtin/registerBuiltIn.cpp \

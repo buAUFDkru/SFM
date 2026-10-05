@@ -144,23 +144,66 @@ public:
      * 1. 重投影误差：单条观测误差 > maxReprojErrorPx 或深度 ≤ 0 → 删除该条观测；
      *    若待删观测数 ≥ 轨迹长度 - 1 → 删除整个点
      * 2. 三角化角：所有观测两两夹角均 < minTriAngleDeg → 删除整个点
+     * @param dist 可选畸变系数（阶段五 5.2）；空/全零时按针孔模型计算重投影
      * @return 被剔除的观测条数
      */
     size_t filterPoints3D(double maxReprojErrorPx, double minTriAngleDeg,
                           const std::vector<int> &pointIds,
                           const std::vector<CameraPose> &poses,
-                          const cv::Mat &K);
+                          const cv::Mat &K,
+                          const cv::Mat &dist = cv::Mat());
 
     /// 过滤全部三维点
     size_t filterAllPoints3D(double maxReprojErrorPx, double minTriAngleDeg,
                              const std::vector<CameraPose> &poses,
-                             const cv::Mat &K);
+                             const cv::Mat &K,
+                             const cv::Mat &dist = cv::Mat());
 
     /// 只过滤「在指定图像上有观测」的三维点
     size_t filterPoints3DInImages(double maxReprojErrorPx, double minTriAngleDeg,
                                   const std::vector<int> &imageIds,
                                   const std::vector<CameraPose> &poses,
-                                  const cv::Mat &K);
+                                  const cv::Mat &K,
+                                  const cv::Mat &dist = cv::Mat());
+
+    /**
+     * @brief 阶段四 4.4：剔除轨迹长度 < minTrackLength 的三维点
+     *
+     * 轨迹长度 1 的点只有一个观测，没有任何冗余约束，无法被检验也无法被 BA
+     * 有效约束（COLMAP min_track_len 语义）。filterPoints3D 内部已有 track < 2
+     * 的隐式删除，这里提供显式、可配置阈值的末尾兜底过滤。
+     * @return 被剔除的观测条数
+     */
+    size_t filterShortTracks(size_t minTrackLength);
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  重建质量统计（阶段四 4.4）
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// 重建质量的量化指标（对齐优化方案「验证方法」一节的指标清单）
+    struct ReconstructionStats
+    {
+        size_t numPoints = 0;          ///< 存活三维点数
+        size_t numObservations = 0;    ///< 总观测条数（= Σ 轨迹长度）
+        double meanTrackLength = 0.0;  ///< 平均轨迹长度
+        double medianTrackLength = 0.0;///< 中位轨迹长度
+        double meanReprojErrorPx = 0.0;///< 平均重投影误差（像素，深度≤0 的观测计为非法并跳过）
+        double medianReprojErrorPx = 0.0; ///< 中位重投影误差（像素）
+        size_t numBehindCamera = 0;    ///< 位于任一观测相机后方的观测条数
+        double meanTriAngleDeg = 0.0;  ///< 平均三角化角（度，每点取其最大观测夹角的均值）
+        double medianTriAngleDeg = 0.0;///< 中位三角化角（度）
+    };
+
+    /**
+     * @brief 计算当前重建的质量统计（只读，不修改任何状态）
+     *
+     * @param poses 相机位姿数组
+     * @param K 内参矩阵
+     * @param dist 可选畸变系数（阶段五 5.2）
+     */
+    ReconstructionStats computeStats(const std::vector<CameraPose> &poses,
+                                     const cv::Mat &K,
+                                     const cv::Mat &dist = cv::Mat()) const;
 
     // ──────────────────────────────────────────────────────────────────────
     //  输出

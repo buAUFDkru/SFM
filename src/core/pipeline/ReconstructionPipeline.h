@@ -69,6 +69,15 @@ struct ReconstructionConfig
 
     cv::Mat cameraMatrix;  ///< 外部提供的相机内参矩阵（空则自动估计）
     bool fixCameraMatrix = false;  ///< 若从cameramatrix.txt读取，则全局BA不优化内参
+
+    // ── 阶段五：相机模型 ──────────────────────────────────────────────────
+    /// 5.1 优先用 EXIF 的 35mm 等效焦距反推 K 初值（无 EXIF 时回落 60°FOV 估计）
+    bool useExifFocal = true;
+    /// 5.2 全局 BA 中联合精化径向/切向畸变 k1,k2,p1,p2（需注册相机数足够多才启用）
+    /// 默认关闭：实机对照显示打开后重投影更优但点数腰斩
+    bool refineDistortion = false;
+    /// 5.3 允许 fx ≠ fy（像素非正方形 / 主点方向标定不准时更贴合）
+    bool refineFocalPerAxis = false;
 };
 
 namespace sfm { class ThreadPool; }

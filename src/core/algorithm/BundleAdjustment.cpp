@@ -77,17 +77,18 @@ struct LocalReprojectionError
     double m_fx, m_fy, m_cx, m_cy;
 };
 
-// ─── 全局BA用重投影误差（内参作为可优化参数，fx=fy=f） ─────────────────────
+// ─── 全局BA用重投影误差（内参作为可优化参数） ───────────────────────────────
 
 /**
- * 自标定重投影误差代价函数
+ * 自标定重投影误差代价函数（无畸变）
  *
- * 内参 K = [f, cx, cy]，共3个参数
- * 约束 fx = fy = f（像素为正方形），减少自由度避免优化退化
+ * 内参 K = [fx, fy, cx, cy]，共4个参数（阶段五 5.3 起 fx/fy 分开存储；
+ * 关闭 refineFocalPerAxis 时用 SubsetManifold 把 fy 固定，等价于旧的
+ * 「单一焦距 fx=fy」行为）。
  *
  * 投影模型：
- *   predicted_x = f * xp + cx
- *   predicted_y = f * yp + cy
+ *   predicted_x = fx * xp + cx
+ *   predicted_y = fy * yp + cy
  */
 struct SelfCalibReprojectionError
 {
@@ -109,9 +110,9 @@ struct SelfCalibReprojectionError
         T xp = p[0] / p[2];
         T yp = p[1] / p[2];
 
-        // K = [f, cx, cy]，fx = fy = f
-        T predicted_x = K[0] * xp + K[1];
-        T predicted_y = K[0] * yp + K[2];
+        // K = [fx, fy, cx, cy]
+        T predicted_x = K[0] * xp + K[2];
+        T predicted_y = K[1] * yp + K[3];
 
         residuals[0] = predicted_x - T(m_obsX);
         residuals[1] = predicted_y - T(m_obsY);
@@ -120,9 +121,72 @@ struct SelfCalibReprojectionError
 
     static ceres::CostFunction *Create(const cv::Point2d &obs)
     {
-        // 残差维度2，参数块维度：camera(6), point(3), K(3)
-        return new ceres::AutoDiffCostFunction<SelfCalibReprojectionError, 2, 6, 3, 3>(
+        // 残差维度2，参数块维度：camera(6), point(3), K(4)
+        return new ceres::AutoDiffCostFunction<SelfCalibReprojectionError, 2, 6, 3, 4>(
             new SelfCalibReprojectionError(obs.x, obs.y));
+    }
+
+    double m_obsX, m_obsY;
+};
+
+// ─── 全局BA用重投影误差（含径向/切向畸变，阶段五 5.2） ─────────────────────
+
+/**
+ * 带畸变的自标定重投影误差
+ *
+ * 参数块：camera(6), point(3), K(4)=[fx,fy,cx,cy], D(4)=[k1,k2,p1,p2]
+ *
+ * 畸变作用于**归一化坐标**，与 OpenCV 的 Brown–Conrady 模型一致
+ * （见 SfmGeometry.h 的 distortNormalized）：
+ *   r² = x² + y²,  radial = 1 + k1·r² + k2·r⁴
+ *   x_d = x·radial + 2·p1·x·y + p2·(r² + 2x²)
+ *   y_d = y·radial + p1·(r² + 2y²) + 2·p2·x·y
+ *
+ * 之所以要显式建模畸变：无人机广角（24mm 等效）在画面边缘的畸变位移可达
+ * 十几像素，远大于当前 0.2~0.9px 的重投影误差水平 —— 也就是说残差里剩下的
+ * 大头很可能就是畸变，把它吸收进位姿会系统性地扭曲相机轨迹。
+ */
+struct SelfCalibDistReprojectionError
+{
+    explicit SelfCalibDistReprojectionError(double obsX, double obsY)
+        : m_obsX(obsX), m_obsY(obsY) {}
+
+    template <typename T>
+    bool operator()(const T *const camera,
+                    const T *const point,
+                    const T *const K,
+                    const T *const D,
+                    T *residuals) const
+    {
+        T p[3];
+        ceres::AngleAxisRotatePoint(camera, point, p);
+        p[0] += camera[3];
+        p[1] += camera[4];
+        p[2] += camera[5];
+
+        const T xp = p[0] / p[2];
+        const T yp = p[1] / p[2];
+
+        const T r2 = xp * xp + yp * yp;
+        const T r4 = r2 * r2;
+        const T radial = T(1.0) + D[0] * r2 + D[1] * r4;
+
+        const T xd = xp * radial + T(2.0) * D[2] * xp * yp +
+                     D[3] * (r2 + T(2.0) * xp * xp);
+        const T yd = yp * radial + D[2] * (r2 + T(2.0) * yp * yp) +
+                     T(2.0) * D[3] * xp * yp;
+
+        residuals[0] = K[0] * xd + K[2] - T(m_obsX);
+        residuals[1] = K[1] * yd + K[3] - T(m_obsY);
+        return true;
+    }
+
+    static ceres::CostFunction *Create(const cv::Point2d &obs)
+    {
+        // 残差维度2，参数块维度：camera(6), point(3), K(4), D(4)
+        return new ceres::AutoDiffCostFunction<SelfCalibDistReprojectionError,
+                                               2, 6, 3, 4, 4>(
+            new SelfCalibDistReprojectionError(obs.x, obs.y));
     }
 
     double m_obsX, m_obsY;
@@ -139,7 +203,8 @@ bool BundleAdjustment::localBundleAdjustment(
     double fx, double fy, double cx, double cy,
     const std::vector<char> &cameraVariable,
     const std::vector<char> &pointVariable,
-    int refCameraIdx)
+    int refCameraIdx,
+    int maxIterations)
 {
     if (cameras.size() < 2 || points3d.empty() || observations.empty())
         return false;
@@ -200,7 +265,7 @@ bool BundleAdjustment::localBundleAdjustment(
     options.linear_solver_type = ceres::SPARSE_SCHUR;
     options.minimizer_type = ceres::TRUST_REGION;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.max_num_iterations = 100;
+    options.max_num_iterations = maxIterations;
     options.num_threads = 4;
     options.minimizer_progress_to_stdout = false;
 
@@ -235,17 +300,29 @@ bool BundleAdjustment::globalBundleAdjustment(
     double &fx, double &fy, double &cx, double &cy,
     bool fixIntrinsics,
     int refCameraIdx,
-    const std::vector<char> *cameraVariable)
+    const std::vector<char> *cameraVariable,
+    int maxIterations,
+    BAIntrinsicsOptions *intr)
 {
     if (cameras.size() < 2 || points3d.empty() || observations.empty())
         return false;
 
     ceres::Problem problem;
 
-    // 内参 K = [f, cx, cy]，约束 fx = fy = f
-    // 初始焦距取 fx 和 fy 的均值
-    double f_init = (fx + fy) / 2.0;
-    double K[3] = {f_init, cx, cy};
+    // 阶段五 5.3：内参 K = [fx, fy, cx, cy]（4 个槽位），
+    // 关闭 refineFocalPerAxis 时用流形把 fy 钉住，行为与旧的 [f,cx,cy] 一致。
+    const bool refinePerAxis  = (intr != nullptr && intr->refineFocalPerAxis);
+    const bool refineDist     = (intr != nullptr && intr->refineDistortion);
+    /// 相机数不足时连焦距一起钉死（调用方通过 canRefineIntrinsics 控制）
+    const bool canRefineFocal = (intr == nullptr || intr->refineFocalLength);
+    const double loScale = (intr != nullptr) ? intr->focalLowerScale : 0.5;
+    const double hiScale = (intr != nullptr) ? intr->focalUpperScale : 4.0;
+
+    double K[4] = {fx, fy, cx, cy};
+    double D[4] = {0.0, 0.0, 0.0, 0.0};
+    if (intr != nullptr) {
+        D[0] = intr->k1; D[1] = intr->k2; D[2] = intr->p1; D[3] = intr->p2;
+    }
 
     const bool hasMask = (cameraVariable != nullptr &&
                           cameraVariable->size() == cameras.size());
@@ -289,17 +366,45 @@ bool BundleAdjustment::globalBundleAdjustment(
                 points3d[ptIdx].data());
         }
     } else {
-        // 内参可变：使用 SelfCalibReprojectionError，添加 K 参数块
-        problem.AddParameterBlock(K, 3);
+        // 内参可变：使用 SelfCalib*ReprojectionError，添加 K（+ 可选 D）参数块
+        problem.AddParameterBlock(K, 4);
         // 弱角度图上无约束自标定是病态问题：主点会滑向非物理值（实测 cy 漂出
         // 图像外），焦距与主点/场景深度强耦合，诱发 CHOLMOD 非正定。
         // 处理：主点固定为初值（其误差可被相机旋转吸收，影响小），
-        // 焦距限制在初值 [0.5, 4] 倍内——estimateK 的 60° FOV 假设可能偏离
-        // 真值 2~3 倍，上限太紧会卡死在错误焦距上（实测点数骤降）。
-        std::vector<int> fixedParams = {1, 2}; // cx, cy
-        problem.SetManifold(K, new ceres::SubsetManifold(3, fixedParams));
-        problem.SetParameterLowerBound(K, 0, 0.5 * K[0]);
-        problem.SetParameterUpperBound(K, 0, 4.0 * K[0]);
+        // 焦距限制在初值 [loScale, hiScale] 倍内——estimateK 的 60° FOV 假设
+        // 可能偏离真值 2~3 倍，上限太紧会卡死在错误焦距上（实测点数骤降）。
+        std::vector<int> fixedParams = {2, 3};           // cx, cy
+        if (!refinePerAxis) fixedParams.push_back(1);    // fy → 单一焦距 fx=fy
+        problem.SetManifold(K, new ceres::SubsetManifold(4, fixedParams));
+        if (!canRefineFocal) {
+            // 相机数太少：焦距与场景尺度同义，放开只会让 f 乱跳（实测 3228~4176）
+            problem.SetParameterBlockConstant(K);
+        }
+        problem.SetParameterLowerBound(K, 0, loScale * std::abs(K[0]));
+        problem.SetParameterUpperBound(K, 0, hiScale * std::abs(K[0]));
+        if (refinePerAxis) {
+            problem.SetParameterLowerBound(K, 1, loScale * std::abs(K[1]));
+            problem.SetParameterUpperBound(K, 1, hiScale * std::abs(K[1]));
+        }
+
+        double *dBlock = nullptr;
+        if (refineDist) {
+            problem.AddParameterBlock(D, 4);
+            // 畸变同样需要限幅：无约束时 k1/k2 会与主点、焦距互相拉扯，
+            // 收敛到「畸变很大 + 焦距很小」这类等价但不物理的组合。
+            const double kMax = intr->maxRadialDistortion;
+            const double pMax = intr->maxTangentialDistortion;
+            problem.SetParameterLowerBound(D, 0, -kMax);
+            problem.SetParameterUpperBound(D, 0,  kMax);
+            problem.SetParameterLowerBound(D, 1, -kMax);
+            problem.SetParameterUpperBound(D, 1,  kMax);
+            problem.SetParameterLowerBound(D, 2, -pMax);
+            problem.SetParameterUpperBound(D, 2,  pMax);
+            problem.SetParameterLowerBound(D, 3, -pMax);
+            problem.SetParameterUpperBound(D, 3,  pMax);
+            dBlock = D;
+        }
+
         for (const auto &obs : observations) {
             int camIdx = std::get<0>(obs);
             int ptIdx  = std::get<1>(obs);
@@ -308,14 +413,15 @@ bool BundleAdjustment::globalBundleAdjustment(
             if (camIdx < 0 || camIdx >= static_cast<int>(cameras.size())) continue;
             if (ptIdx < 0 || ptIdx >= static_cast<int>(points3d.size())) continue;
 
-            ceres::CostFunction *cost =
-                SelfCalibReprojectionError::Create(pt);
-
-            problem.AddResidualBlock(
-                cost, loss,
-                cameras[camIdx].data(),
-                points3d[ptIdx].data(),
-                K);
+            if (refineDist) {
+                problem.AddResidualBlock(
+                    SelfCalibDistReprojectionError::Create(pt), loss,
+                    cameras[camIdx].data(), points3d[ptIdx].data(), K, dBlock);
+            } else {
+                problem.AddResidualBlock(
+                    SelfCalibReprojectionError::Create(pt), loss,
+                    cameras[camIdx].data(), points3d[ptIdx].data(), K);
+            }
         }
     }
 
@@ -323,7 +429,7 @@ bool BundleAdjustment::globalBundleAdjustment(
     options.linear_solver_type = ceres::SPARSE_SCHUR;
     options.minimizer_type = ceres::TRUST_REGION;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.max_num_iterations = 200;
+    options.max_num_iterations = maxIterations;
     options.num_threads = 4;
     options.minimizer_progress_to_stdout = false;
 
@@ -334,16 +440,40 @@ bool BundleAdjustment::globalBundleAdjustment(
         std::chrono::steady_clock::now() - gbaT0).count();
 
     if (!fixIntrinsics) {
-        // 回写优化后的内参：fx = fy = f
-        fx = K[0];
-        fy = K[0];
-        cx = K[1];
-        cy = K[2];
-        qDebug().noquote()
-            << QString("[BA全局+自标定] 精化内参: f=%1 (fx=fy), cx=%2, cy=%3")
-                   .arg(fx, 0, 'f', 2).arg(cx, 0, 'f', 2).arg(cy, 0, 'f', 2);
+        // 回写优化后的内参
+        if (refinePerAxis) {
+            fx = K[0];
+            fy = K[1];
+        } else {
+            fx = K[0];
+            fy = K[0];
+        }
+        cx = K[2];
+        cy = K[3];
+
+        if (refineDist) {
+            qDebug().noquote()
+                << QString("[BA全局+自标定] 精化内参: fx=%1 fy=%2 cx=%3 cy=%4 | "
+                           "畸变 k1=%5 k2=%6 p1=%7 p2=%8")
+                       .arg(fx, 0, 'f', 2).arg(fy, 0, 'f', 2)
+                       .arg(cx, 0, 'f', 2).arg(cy, 0, 'f', 2)
+                       .arg(D[0], 0, 'e', 3).arg(D[1], 0, 'e', 3)
+                       .arg(D[2], 0, 'e', 3).arg(D[3], 0, 'e', 3);
+        } else {
+            qDebug().noquote()
+                << QString("[BA全局+自标定] 精化内参: f=%1 (fx=fy), cx=%2, cy=%3")
+                       .arg(fx, 0, 'f', 2).arg(cx, 0, 'f', 2).arg(cy, 0, 'f', 2);
+        }
     } else {
         qDebug().noquote() << "[BA全局] 内参保持固定，未进行自标定精化";
+    }
+
+    // 畸变结果原地回写（intr 是输入输出参数，调用方直接读 k1..p2 即可）
+    if (refineDist && intr != nullptr) {
+        intr->k1 = D[0];
+        intr->k2 = D[1];
+        intr->p1 = D[2];
+        intr->p2 = D[3];
     }
 
     qDebug().noquote()

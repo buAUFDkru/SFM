@@ -29,6 +29,7 @@
 
 #include "algorithm/Initialization.h"
 #include "algorithm/MatcherService.h"
+#include "algorithm/SfmGeometry.h"
 #include "algorithm/Triangulate.h"
 #include "algorithm/CorrespondenceGraph.h"
 #include "algorithm/ObservationManager.h"
@@ -610,6 +611,195 @@ int main(int argc, char **argv)
                              usedQ, usedT, none) == 0,
               "无几何模型时引导匹配不产出结果");
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[10] 连通分量：图不连通时保留最大分量（阶段四 4.5）\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        // 6 个节点：{0,1,2} 三角环、{3,4} 一条边、{5} 孤立
+        std::vector<std::pair<int, int>> edges = {{0, 1}, {1, 2}, {2, 0}, {3, 4}};
+        const SfmGeom::GraphComponents comps = SfmGeom::connectedComponents(6, edges);
+        check(comps.numComponents == 3,
+              QString("6 节点 4 边 → 3 个分量 (实际 %1)").arg(comps.numComponents));
+        check(comps.largest >= 0 && comps.sizes[static_cast<size_t>(comps.largest)] == 3,
+              "最大分量大小 = 3");
+        check(comps.compId[0] == comps.compId[1] && comps.compId[1] == comps.compId[2],
+              "0/1/2 属同一分量");
+        check(comps.compId[3] == comps.compId[4] && comps.compId[3] != comps.compId[0],
+              "3/4 属同一分量且与主分量不同");
+        check(comps.compId[5] != comps.compId[0] && comps.compId[5] != comps.compId[3],
+              "5 为孤立分量");
+
+        std::vector<MatchPair> pairs(4);
+        pairs[0].imageId1 = 0; pairs[0].imageId2 = 1;
+        pairs[1].imageId1 = 1; pairs[1].imageId2 = 2;
+        pairs[2].imageId1 = 2; pairs[2].imageId2 = 0;
+        pairs[3].imageId1 = 3; pairs[3].imageId2 = 4;
+
+        const SfmGeom::LargestComponentResult res =
+            SfmGeom::keepLargestComponent(pairs, 6);
+        check(res.numComponents == 3 && res.mainSize == 3,
+              "过滤结果: 分量数=3, 主分量大小=3");
+        check(res.removedPairs == 1 && pairs.size() == 3,
+              "剔除 1 条跨分量边, 保留 3 条主分量边");
+        check(res.isolatedImages == 1, "孤立图像 1 张");
+
+        // 连通图应原样保留
+        std::vector<MatchPair> connected(2);
+        connected[0].imageId1 = 0; connected[0].imageId2 = 1;
+        connected[1].imageId1 = 1; connected[1].imageId2 = 2;
+        const SfmGeom::LargestComponentResult resOk =
+            SfmGeom::keepLargestComponent(connected, 3);
+        check(resOk.numComponents == 1 && connected.size() == 2,
+              "连通图不做任何剔除");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[11] 场景归一化：质心归零 + 平均光心距缩放（阶段四 4.6）\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        const cv::Vec3d centers[4] = {
+            { 5.0,  0.0,  0.0}, { 0.0,  5.0,  2.0},
+            {-5.0,  0.0, -1.0}, { 0.0, -5.0,  1.0}};
+        std::vector<CameraPose> poses(4);
+        std::vector<cv::Mat> R0(4), t0(4);
+        for (int i = 0; i < 4; ++i) {
+            makePose(centers[i], R0[static_cast<size_t>(i)], t0[static_cast<size_t>(i)]);
+            poses[static_cast<size_t>(i)].imageId = i;
+            poses[static_cast<size_t>(i)].R = R0[static_cast<size_t>(i)].clone();
+            poses[static_cast<size_t>(i)].t = t0[static_cast<size_t>(i)].clone();
+            poses[static_cast<size_t>(i)].registered = true;
+        }
+
+        std::vector<Point3D> pts(3);
+        const cv::Vec3d world[3] = {{0, 0, 0}, {1, 1, 0}, {-1, 0.5, 1}};
+        for (int i = 0; i < 3; ++i) {
+            pts[static_cast<size_t>(i)].position =
+                cv::Point3d(world[i][0], world[i][1], world[i][2]);
+        }
+
+        // 归一化前的投影基准（相似变换不变量）
+        const cv::Point2d projBefore0 = project(world[0], R0[0], t0[0], K);
+        const cv::Point2d projBefore2 = project(world[2], R0[3], t0[3], K);
+
+        SfmGeom::normalizeScene(pts, poses, 10.0);
+
+        cv::Vec3d centroid(0, 0, 0);
+        std::vector<cv::Vec3d> newCenters(4);
+        for (int i = 0; i < 4; ++i) {
+            newCenters[static_cast<size_t>(i)] =
+                SfmGeom::cameraCenter(poses[static_cast<size_t>(i)].R,
+                                      poses[static_cast<size_t>(i)].t);
+            centroid += newCenters[static_cast<size_t>(i)];
+        }
+        centroid /= 4.0;
+        double meanDist = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            meanDist += cv::norm(newCenters[static_cast<size_t>(i)] - centroid);
+        }
+        meanDist /= 4.0;
+
+        check(cv::norm(centroid) < 1e-6,
+              QString("光心质心归零 (残差 %.2e)").arg(cv::norm(centroid)));
+        check(std::fabs(meanDist - 10.0) < 1e-6,
+              QString("平均光心距 = 10 (实际 %1)").arg(meanDist, 0, 'f', 6));
+
+        const cv::Point2d projAfter0 = project(
+            cv::Vec3d(pts[0].position.x, pts[0].position.y, pts[0].position.z),
+            poses[0].R, poses[0].t, K);
+        const cv::Point2d projAfter2 = project(
+            cv::Vec3d(pts[2].position.x, pts[2].position.y, pts[2].position.z),
+            poses[3].R, poses[3].t, K);
+        check(cv::norm(projAfter0 - projBefore0) < 1e-6 &&
+              cv::norm(projAfter2 - projBefore2) < 1e-6,
+              "归一化前后投影一致（相似变换不改变几何）");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[12] 末尾滤波：短轨迹剔除 + 重建统计（阶段四 4.4）\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        // 3 张图 × 3 个关键点；相机沿 x 轴排开，R=I，t=-C
+        const size_t numImgs = 3;
+        std::vector<FeatureResult> feats(numImgs);
+        for (size_t i = 0; i < numImgs; ++i) {
+            feats[i].imageId = static_cast<int>(i);
+            feats[i].imageWidth = 100;
+            feats[i].imageHeight = 100;
+            feats[i].keypoints.resize(3);
+        }
+
+        const cv::Mat Ki = (cv::Mat_<double>(3, 3) <<
+                            50.0, 0.0, 50.0,
+                            0.0, 50.0, 50.0,
+                            0.0, 0.0, 1.0);
+        const cv::Mat Ri = cv::Mat::eye(3, 3, CV_64F);
+        const cv::Vec3d camC[numImgs] = {{0, 0, 0}, {2, 0, 0}, {-2, 0, 0}};
+
+        // 点 A(0,0,10)：3 个观测，关键点取精确投影 → 重投影误差 0
+        // 点 C(0,0,-10)：2 个观测，位于所有相机后方 → numBehindCamera
+        const cv::Vec3d worldA(0, 0, 10);
+        const cv::Vec3d worldC(0, 0, -10);
+        std::vector<std::vector<cv::Point2f>> proj(static_cast<size_t>(numImgs),
+                                                   std::vector<cv::Point2f>(3));
+        for (size_t i = 0; i < numImgs; ++i) {
+            const cv::Mat ti = (cv::Mat_<double>(3, 1) <<
+                                -camC[i][0], -camC[i][1], -camC[i][2]);
+            const cv::Point2d pa = project(worldA, Ri, ti, Ki);
+            feats[i].keypoints[0].pt = cv::Point2f(static_cast<float>(pa.x),
+                                                   static_cast<float>(pa.y));
+            feats[i].keypoints[1].pt = cv::Point2f(10.f + 5.f * static_cast<float>(i), 20.f);
+            feats[i].keypoints[2].pt = cv::Point2f(30.f, 40.f + 5.f * static_cast<float>(i));
+        }
+
+        CorrespondenceGraph graph;
+        graph.build({}, std::vector<int>{3, 3, 3});
+        ObservationManager obs(feats, graph);
+
+        const cv::Vec3b color(255, 128, 0);
+        const int idA = obs.addPoint3D(
+            cv::Point3d(worldA[0], worldA[1], worldA[2]),
+            {{0, 0}, {1, 0}, {2, 0}}, color);
+        const int idB = obs.addPoint3D(
+            cv::Point3d(1, 2, 3), {{0, 1}}, color);
+        const int idC = obs.addPoint3D(
+            cv::Point3d(worldC[0], worldC[1], worldC[2]),
+            {{0, 2}, {1, 2}}, color);
+        check(idA >= 0 && idB >= 0 && idC >= 0 && obs.numAlivePoints() == 3,
+              "初始 3 个点全部建立");
+
+        std::vector<CameraPose> poses(numImgs);
+        for (size_t i = 0; i < numImgs; ++i) {
+            poses[i].imageId = static_cast<int>(i);
+            poses[i].R = Ri.clone();
+            poses[i].t = (cv::Mat_<double>(3, 1) <<
+                          -camC[i][0], -camC[i][1], -camC[i][2]);
+            poses[i].registered = true;
+        }
+
+        // 短轨迹过滤：B（1 条观测）被删
+        const size_t removed = obs.filterShortTracks(2);
+        check(removed == 1 && obs.numAlivePoints() == 2,
+              QString("短轨迹过滤: 删 %1 条观测, 剩 %2 点")
+                  .arg(static_cast<qlonglong>(removed))
+                  .arg(static_cast<qlonglong>(obs.numAlivePoints())));
+        check(obs.pointIdAt(0, 1) == -1 && obs.pointIdAt(0, 0) == idA,
+              "kpTo3D 同步清理（B 的映射删除, A 保留）");
+
+        const auto st = obs.computeStats(poses, Ki);
+        check(st.numPoints == 2 && st.numObservations == 5,
+              QString("统计: 点=%1 观测=%2")
+                  .arg(static_cast<qlonglong>(st.numPoints))
+                  .arg(static_cast<qlonglong>(st.numObservations)));
+        check(std::fabs(st.meanTrackLength - 2.5) < 1e-9,
+              QString("平均轨迹长=2.5 (实际 %1)").arg(st.meanTrackLength));
+        check(st.meanReprojErrorPx < 1e-6 && st.medianReprojErrorPx < 1e-6,
+              QString("重投影误差=0 (均值 %1)").arg(st.meanReprojErrorPx));
+        check(st.numBehindCamera == 2,
+              QString("相机后方观测 = 2 (实际 %1)").arg(static_cast<qlonglong>(st.numBehindCamera)));
+        check(st.medianTriAngleDeg > 0.0,
+              "三角化角统计有效");
     }
 
     std::printf("\n========== 结果: 通过 %d, 失败 %d ==========\n", g_passed, g_failed);
