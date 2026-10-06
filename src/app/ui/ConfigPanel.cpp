@@ -65,6 +65,21 @@ void ConfigPanel::setupUI()
     connect(m_cameraCheck, &QCheckBox::toggled,
             this, &ConfigPanel::cameraFrustaVisibleChanged);
     displayLayout->addWidget(m_cameraCheck);
+
+    // 稀疏/密集点云显隐：二选一显示，但不用 radio 语义——
+    // 勾选一个时由 MainWindow 接收信号后关闭另一个
+    m_sparseCloudCheck = new QCheckBox(tr("稀疏点云"), displayBox);
+    m_sparseCloudCheck->setEnabled(false);   // 重建/加载后按存在性启用
+    connect(m_sparseCloudCheck, &QCheckBox::toggled,
+            this, &ConfigPanel::sparseCloudVisibleChanged);
+    displayLayout->addWidget(m_sparseCloudCheck);
+
+    m_denseCloudCheck = new QCheckBox(tr("密集点云"), displayBox);
+    m_denseCloudCheck->setEnabled(false);
+    connect(m_denseCloudCheck, &QCheckBox::toggled,
+            this, &ConfigPanel::denseCloudVisibleChanged);
+    displayLayout->addWidget(m_denseCloudCheck);
+
     layout->addWidget(displayBox);
 
     layout->addStretch();
@@ -106,6 +121,35 @@ void ConfigPanel::setCameraFrustaChecked(bool checked)
     if (m_cameraCheck->isChecked() != checked) {
         QSignalBlocker blocker(m_cameraCheck);
         m_cameraCheck->setChecked(checked);
+    }
+}
+
+void ConfigPanel::setCloudAvailability(bool sparse, bool dense)
+{
+    auto sync = [](QCheckBox *box, bool available) {
+        box->setEnabled(available);
+        if (!available && box->isChecked()) {
+            QSignalBlocker blocker(box);
+            box->setChecked(false);
+        }
+    };
+    sync(m_sparseCloudCheck, sparse);
+    sync(m_denseCloudCheck, dense);
+}
+
+void ConfigPanel::setSparseCloudChecked(bool checked)
+{
+    if (m_sparseCloudCheck->isChecked() != checked) {
+        QSignalBlocker blocker(m_sparseCloudCheck);
+        m_sparseCloudCheck->setChecked(checked);
+    }
+}
+
+void ConfigPanel::setDenseCloudChecked(bool checked)
+{
+    if (m_denseCloudCheck->isChecked() != checked) {
+        QSignalBlocker blocker(m_denseCloudCheck);
+        m_denseCloudCheck->setChecked(checked);
     }
 }
 

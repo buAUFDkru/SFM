@@ -96,6 +96,10 @@ private slots:
     void onStagePointCloudReady(const QVector<float> &points,
                                 const QVector<float> &colors,
                                 const QString &stageName);
+    /// 「稀疏点云」复选框被勾选：显示稀疏点云，并联动取消「密集点云」
+    void onSparseCloudVisible(bool checked);
+    /// 「密集点云」复选框被勾选：显示密集点云，并联动取消「稀疏点云」
+    void onDenseCloudVisible(bool checked);
     void updateStatusLabel();
 
 private:
@@ -104,6 +108,12 @@ private:
     void setupCentralWidget();
     void connectSignals();
     void loadAndDisplayCloudFromOutput();
+    /// 显示 lastOutput 中指定类型的点云（云已在显示坐标系，无需变换）
+    void displayCloudFromOutput(bool dense);
+    /// 同步「稀疏/密集点云」复选框的可用性与勾选状态（不触发显示切换）
+    void syncCloudDisplayChecks(bool denseSelected);
+    /// 判断 lastOutput 中稀疏/密集点云是否存在
+    bool cloudAvailable(bool dense) const;
     /// 将当前输出的相机位姿叠加为金字塔线框（尺度取点云包围盒的 12%）
     void updateCameraFrustaFromOutput();
 
@@ -127,6 +137,7 @@ private:
     SparseReconstructionDialog *m_sparseDialog = nullptr;
     QToolButton *m_logToggle = nullptr;
     int m_logWidth = 300;       ///< 日志面板隐藏前的宽度（恢复显示时还原）
+    bool m_showDense = false;   ///< 当前显示的点云类型（false=稀疏 true=密集）
     QLabel *m_statusLabel = nullptr;
     QMenu *m_recentMenu = nullptr;
     QAction *m_frustaAction = nullptr;  ///< 视图菜单"显示相机位姿"（与面板复选框同步）

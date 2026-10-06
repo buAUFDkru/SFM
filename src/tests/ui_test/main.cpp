@@ -561,6 +561,55 @@ private slots:
         CHECK_UI(cb->isChecked(), "程序化同步勾选");
         CHECK_UI(spy.count() == 1, "程序化同步不发信号");
     }
+
+    void cloudCheckboxes()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        ConfigPanel panel(&reg);
+
+        // 找出稀疏/密集两个复选框（按文本区分，排除"相机"）
+        QCheckBox *sparse = nullptr;
+        QCheckBox *dense = nullptr;
+        const auto boxes = panel.findChildren<QCheckBox *>();
+        for (QCheckBox *b : boxes) {
+            if (b->text() == QStringLiteral("稀疏点云"))
+                sparse = b;
+            else if (b->text() == QStringLiteral("密集点云"))
+                dense = b;
+        }
+        CHECK_UI(sparse != nullptr && dense != nullptr, "点云显示复选框存在");
+        if (!sparse || !dense)
+            return;
+        CHECK_UI(!sparse->isEnabled() && !dense->isEnabled(), "初始禁用");
+        CHECK_UI(!sparse->isChecked() && !dense->isChecked(), "初始未勾选");
+
+        // 可用性：仅稀疏存在 → 稀疏可点、密集禁用
+        panel.setCloudAvailability(true, false);
+        CHECK_UI(sparse->isEnabled() && !dense->isEnabled(), "按存在性启用");
+        CHECK_UI(!sparse->isChecked() && !dense->isChecked(), "启用后未勾选");
+
+        // 程序化勾选不发信号
+        QSignalSpy sparseSpy(&panel, &ConfigPanel::sparseCloudVisibleChanged);
+        QSignalSpy denseSpy(&panel, &ConfigPanel::denseCloudVisibleChanged);
+        panel.setSparseCloudChecked(true);
+        CHECK_UI(sparse->isChecked() && sparseSpy.count() == 0,
+                 "程序化勾选稀疏不发信号");
+
+        // 用户点击密集（可用性放开后）→ 发信号；互斥由接收方联动
+        panel.setCloudAvailability(true, true);
+        dense->setChecked(true);
+        CHECK_UI(denseSpy.count() == 1 && denseSpy.first().at(0).toBool(),
+                 "用户勾选密集发信号");
+        CHECK_UI(sparseSpy.count() == 0, "面板自身不联动（互斥在 MainWindow）");
+
+        // 程序化取消稀疏不发信号；禁用时静默复位勾选
+        panel.setSparseCloudChecked(false);
+        CHECK_UI(!sparse->isChecked() && sparseSpy.count() == 0,
+                 "程序化取消不发信号");
+        panel.setCloudAvailability(true, false);
+        CHECK_UI(!dense->isChecked() && denseSpy.count() == 1,
+                 "禁用时静默取消勾选");
+    }
 };
 
 class TestDarkTheme : public QObject
@@ -930,6 +979,28 @@ private slots:
         CHECK_UI(w.currentImageCount() == 6, "图像数 6");
         CHECK_UI(QFile::exists(projDir + QStringLiteral("/SmokeProject.sfmproj")),
                  "UI 路径项目清单存在");
+
+        // 稀疏+密集点云都生成后：密集默认显示，显示选项复选框同步
+        auto *panel = w.findChild<ConfigPanel *>();
+        CHECK_UI(panel != nullptr, "找到左侧面板");
+        if (panel) {
+            QCheckBox *sparse = nullptr;
+            QCheckBox *dense = nullptr;
+            const auto boxes = panel->findChildren<QCheckBox *>();
+            for (QCheckBox *b : boxes) {
+                if (b->text() == QStringLiteral("稀疏点云"))
+                    sparse = b;
+                else if (b->text() == QStringLiteral("密集点云"))
+                    dense = b;
+            }
+            CHECK_UI(sparse && dense, "点云复选框存在");
+            if (sparse && dense) {
+                CHECK_UI(sparse->isEnabled() && dense->isEnabled(),
+                         "两种点云都存在时复选框可用");
+                CHECK_UI(!sparse->isChecked() && dense->isChecked(),
+                         "密集生成后默认勾选密集");
+            }
+        }
     }
 };
 

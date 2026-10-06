@@ -48,10 +48,22 @@ public:
     /// 程序化同步「相机」复选框（视图菜单切换时；不触发信号）
     void setCameraFrustaChecked(bool checked);
 
+    /// 根据点云存在性启用/禁用「稀疏/密集点云」复选框
+    /// （无对应点云时禁用并静默取消勾选）
+    void setCloudAvailability(bool sparse, bool dense);
+    /// 程序化同步「稀疏点云」复选框（不触发信号）
+    void setSparseCloudChecked(bool checked);
+    /// 程序化同步「密集点云」复选框（不触发信号）
+    void setDenseCloudChecked(bool checked);
+
 signals:
     void configChanged();
     /// 「相机」复选框切换（金字塔显隐）
     void cameraFrustaVisibleChanged(bool visible);
+    /// 「稀疏点云」复选框被勾选/取消（用户点击；互斥关闭由接收方联动）
+    void sparseCloudVisibleChanged(bool checked);
+    /// 「密集点云」复选框被勾选/取消（用户点击；互斥关闭由接收方联动）
+    void denseCloudVisibleChanged(bool checked);
 
 private:
     void setupUI();
@@ -66,6 +78,8 @@ private:
 
     // 显示选项
     QCheckBox *m_cameraCheck = nullptr;
+    QCheckBox *m_sparseCloudCheck = nullptr;
+    QCheckBox *m_denseCloudCheck = nullptr;
 
     QStringList m_imageFiles;
     cv::Mat m_cameraMatrix;

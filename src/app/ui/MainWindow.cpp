@@ -123,12 +123,15 @@ void MainWindow::runPipelineSyncForTest()
     m_pipeline->setConfig(cfg);
     ReconstructionOutput output = m_pipeline->execute();
 
-    // 与 UI 路径（onPipelineFinished）保持一致：重建成功后自动保存项目
+    // 与 UI 路径（onPipelineFinished）保持一致：重建成功后自动保存项目，
+    // 并完成点云显示与显示选项复选框同步（测试直调路径无回调事件）
     if (output.sparseCloud && !output.sparseCloud->empty() && !m_projectDir.isEmpty()) {
         m_pipeline->saveProject();
         m_dirty = false;
         updateTitle();
     }
+    if (output.sparseCloud && !output.sparseCloud->empty())
+        loadAndDisplayCloudFromOutput();
 }
 
 void MainWindow::setupMenuBar()
@@ -301,6 +304,12 @@ void MainWindow::connectSignals()
                 if (m_frustaAction)
                     m_frustaAction->setChecked(visible);
             });
+    // 稀疏/密集点云互斥显示：勾选一个时显示对应点云，
+    // 并在此信号处理中联动取消另一个（非 radio 语义）
+    connect(m_configPanel, &ConfigPanel::sparseCloudVisibleChanged,
+            this, &MainWindow::onSparseCloudVisible);
+    connect(m_configPanel, &ConfigPanel::denseCloudVisibleChanged,
+            this, &MainWindow::onDenseCloudVisible);
 }
 
 // ═══════════════════════════ 项目管理 ═══════════════════════════
@@ -345,6 +354,8 @@ void MainWindow::onCreateProject()
     m_configPanel->setProjectSummary(m_projectName,
                                      tr("%1 张图像").arg(dlg.imageFiles().size()));
     m_configPanel->setProjectLoaded(true);
+    // 新项目尚无点云：禁用并复位稀疏/密集显示选项
+    m_configPanel->setCloudAvailability(false, false);
     m_sparseDialog->setStartEnabled(true);
 
     markDirty();
@@ -739,9 +750,50 @@ void MainWindow::onStagePointCloudReady(const QVector<float> &points,
     m_logConsole->appendInfo(tr("[%1] 阶段点云: %2 点")
                                  .arg(stageName).arg(points.size() / 3));
     m_pointCloudWidget->updatePointCloud(points, colors, true);
+    m_showDense = (stageName == QStringLiteral("dense"));
+
+    // 阶段点云就绪即同步：稀疏阶段显示稀疏、密集阶段显示密集，
+    // 显示选项复选框跟随切换（重建流程：稀疏先生成后密集覆盖显示）。
+    // 注意 dense 阶段事件发射于 lastOutput.denseCloud 组装之前，
+    // 存在性按事件本身推断，不能依赖 cloudAvailable
+    if (m_configPanel) {
+        m_configPanel->setCloudAvailability(m_showDense ? cloudAvailable(false)
+                                                        : true,
+                                            m_showDense);
+        m_configPanel->setSparseCloudChecked(!m_showDense);
+        m_configPanel->setDenseCloudChecked(m_showDense);
+    }
 
     // 阶段点云就绪即同步相机位姿金字塔（稀疏完成时 lastOutput 已含位姿）
     updateCameraFrustaFromOutput();
+}
+
+void MainWindow::onSparseCloudVisible(bool checked)
+{
+    if (!checked)           // 取消勾选不改变当前显示
+        return;
+    if (!cloudAvailable(false)) {
+        m_logConsole->appendInfo(tr("稀疏点云不可用"));
+        return;
+    }
+    m_showDense = false;
+    displayCloudFromOutput(false);
+    if (m_configPanel)
+        m_configPanel->setDenseCloudChecked(false);   // 信号联动关闭另一个
+}
+
+void MainWindow::onDenseCloudVisible(bool checked)
+{
+    if (!checked)
+        return;
+    if (!cloudAvailable(true)) {
+        m_logConsole->appendInfo(tr("密集点云不可用"));
+        return;
+    }
+    m_showDense = true;
+    displayCloudFromOutput(true);
+    if (m_configPanel)
+        m_configPanel->setSparseCloudChecked(false);  // 信号联动关闭另一个
 }
 
 void MainWindow::updateStatusLabel()
@@ -751,14 +803,32 @@ void MainWindow::updateStatusLabel()
 
 void MainWindow::loadAndDisplayCloudFromOutput()
 {
+    // 加载/重建完成：优先显示密集点云（不存在时显示稀疏）
+    const bool dense = cloudAvailable(true);
+    m_showDense = dense;
+    displayCloudFromOutput(dense);
+    if (m_configPanel)
+        syncCloudDisplayChecks(dense);
+    updateCameraFrustaFromOutput();
+}
+
+bool MainWindow::cloudAvailable(bool dense) const
+{
+    if (!m_pipeline)
+        return false;
+    const ReconstructionOutput &output = m_pipeline->lastOutput();
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud =
+        dense ? output.denseCloud : output.sparseCloud;
+    return cloud && !cloud->empty();
+}
+
+void MainWindow::displayCloudFromOutput(bool dense)
+{
     if (!m_pipeline)
         return;
-
     const ReconstructionOutput &output = m_pipeline->lastOutput();
-
     const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud =
-        (output.denseCloud && !output.denseCloud->empty()) ? output.denseCloud
-                                                           : output.sparseCloud;
+        dense ? output.denseCloud : output.sparseCloud;
 
     if (!cloud || cloud->empty()) {
         m_logConsole->appendInfo(tr("点云为空，无法显示"));
@@ -780,8 +850,18 @@ void MainWindow::loadAndDisplayCloudFromOutput()
         colors.append(pt.b / 255.0f);
     }
     m_pointCloudWidget->updatePointCloud(points, colors, true);
+}
 
-    updateCameraFrustaFromOutput();
+void MainWindow::syncCloudDisplayChecks(bool denseSelected)
+{
+    if (!m_configPanel)
+        return;
+    const bool hasSparse = cloudAvailable(false);
+    const bool hasDense = cloudAvailable(true);
+    // 先按存在性启用，再同步勾选（静默，不触发显示切换信号）
+    m_configPanel->setCloudAvailability(hasSparse, hasDense);
+    m_configPanel->setSparseCloudChecked(!denseSelected && hasSparse);
+    m_configPanel->setDenseCloudChecked(denseSelected && hasDense);
 }
 
 CameraFrustumGeometry MainWindow::cameraFrustumGeometry(const std::vector<CameraPose> &poses,
