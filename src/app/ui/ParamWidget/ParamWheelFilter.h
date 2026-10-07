@@ -18,6 +18,10 @@
  *
  * 用法：editor->installEventFilter(new ParamWheelFilter(editor))，
  * 以编辑器为 parent 随其销毁。
+ *
+ * ⚠ 必须同时把控件 focusPolicy 设为 StrongFocus（QSpinBox/QComboBox
+ * 默认 WheelFocus——窗口层会在滚轮事件送达前把焦点授予悬停控件，
+ * 导致本过滤器的 hasFocus 判断失效、悬停照样改值）。
  */
 class ParamWheelFilter : public QObject
 {

@@ -152,7 +152,9 @@ void DenseReconstructionDialog::setupUI()
 
     QFormLayout *formLayout = new QFormLayout();
     m_methodCombo = new QComboBox(this);
-    // 悬停滚轮不切换方法（焦点门控，滚轮留给页面滚动）
+    // 悬停滚轮不切换方法（焦点门控：需去掉 WheelFocus，否则滚轮先给焦点
+    // 绕过过滤器；滚轮留给页面滚动）
+    m_methodCombo->setFocusPolicy(Qt::StrongFocus);
     m_methodCombo->installEventFilter(new ParamWheelFilter(m_methodCombo));
     formLayout->addRow(tr("密集重建方法:"), m_methodCombo);
     mainLayout->addLayout(formLayout);

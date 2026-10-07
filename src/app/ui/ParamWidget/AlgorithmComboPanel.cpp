@@ -34,7 +34,9 @@ AlgorithmComboPanel::AlgorithmComboPanel(const QString &category,
     auto *row = new QHBoxLayout();
     row->addWidget(new QLabel(tr("算法:"), box));
     m_algoCombo = new QComboBox(box);
-    // 滚轮不切换算法（焦点门控：悬停滚轮留给页面滚动，聚焦后滚轮可切换）
+    // 滚轮不切换算法（焦点门控：悬停滚轮留给页面滚动，聚焦后滚轮可切换；
+    // 需去掉 WheelFocus，否则滚轮先给焦点绕过过滤器）
+    m_algoCombo->setFocusPolicy(Qt::StrongFocus);
     m_algoCombo->installEventFilter(new ParamWheelFilter(m_algoCombo));
     row->addWidget(m_algoCombo, 1);
     v->addLayout(row);

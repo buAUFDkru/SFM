@@ -348,6 +348,10 @@ private slots:
         CHECK_UI(spin != nullptr, "参数表单含 SpinBox");
         if (!spin)
             return;
+        // 防绕过守卫：WheelFocus 策略下窗口层会先把焦点授予悬停控件，
+        // 焦点门控过滤器即失效——编辑器必须是 StrongFocus
+        CHECK_UI(spin->focusPolicy() == Qt::StrongFocus,
+                 "SpinBox 焦点策略为 StrongFocus");
         const int before = spin->value();
 
         // 无焦点：滚轮不改值（事件 ignore 交还传播链，由页面滚动）
