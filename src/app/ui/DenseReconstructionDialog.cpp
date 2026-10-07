@@ -146,7 +146,7 @@ DenseReconstructionDialog::DenseReconstructionDialog(QWidget *parent)
 void DenseReconstructionDialog::setupUI()
 {
     setWindowTitle(tr("选择密集重建方法"));
-    setMinimumWidth(380);
+    setMinimumWidth(440);
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
@@ -173,11 +173,12 @@ void DenseReconstructionDialog::setupUI()
     m_buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     mainLayout->addWidget(m_buttonBox);
 
-    // 限制对话框高度不超过屏幕可用高度的 85%，避免超出屏幕
+    // 限制对话框高度不超过屏幕可用高度的 85%，避免超出屏幕；
+    // 初始尺寸与稀疏重建对话框一致（最小宽度 440，初始高 640）
     if (const QScreen *scr = this->screen()) {
         const int maxH = static_cast<int>(scr->availableGeometry().height() * 0.85);
         setMaximumHeight(maxH);
-        resize(minimumSizeHint().expandedTo(QSize(minimumWidth(), maxH / 2)));
+        resize(440, qMin(maxH, 640));
     }
 
     connect(m_methodCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
