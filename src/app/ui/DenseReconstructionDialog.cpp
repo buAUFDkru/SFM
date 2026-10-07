@@ -5,6 +5,7 @@
 
 #include "DenseReconstructionDialog.h"
 #include "ParamWidget/ParamFormGenerator.h"
+#include "ParamWidget/ParamWheelFilter.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -151,6 +152,8 @@ void DenseReconstructionDialog::setupUI()
 
     QFormLayout *formLayout = new QFormLayout();
     m_methodCombo = new QComboBox(this);
+    // 悬停滚轮不切换方法（焦点门控，滚轮留给页面滚动）
+    m_methodCombo->installEventFilter(new ParamWheelFilter(m_methodCombo));
     formLayout->addRow(tr("密集重建方法:"), m_methodCombo);
     mainLayout->addLayout(formLayout);
 

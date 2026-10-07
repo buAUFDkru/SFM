@@ -25,6 +25,7 @@ HEADERS += \
     ui/SparseReconstructionDialog.h \
     ui/LogWidget/LogConsole.h \
     ui/ParamWidget/ParamFormGenerator.h \
+    ui/ParamWidget/ParamWheelFilter.h \
     ui/ParamWidget/AlgorithmComboPanel.h \
     ui/ViewWidget/PointCloudWidget.h
 

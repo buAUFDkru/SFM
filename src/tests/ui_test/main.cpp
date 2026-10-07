@@ -14,6 +14,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QSpinBox>
 #include <QDir>
 #include <QFile>
 #include <QGroupBox>
@@ -335,6 +336,36 @@ private slots:
             CHECK_UI(combo->currentIndex() == other, "程序化切换仍有效");
             combo->setCurrentIndex(before);
         }
+    }
+
+    /// 回归：参数 SpinBox 滚轮焦点门控（悬停不改值，聚焦后可调值）
+    void spinWheelFocusGated()
+    {
+        PluginRegistry &reg = PluginRegistry::instance();
+        AlgorithmComboPanel panel(QStringLiteral("descriptor"), &reg, QStringLiteral("描述符"));
+
+        QSpinBox *spin = panel.findChild<QSpinBox *>();
+        CHECK_UI(spin != nullptr, "参数表单含 SpinBox");
+        if (!spin)
+            return;
+        const int before = spin->value();
+
+        // 无焦点：滚轮不改值（事件 ignore 交还传播链，由页面滚动）
+        QWheelEvent wheelUp(QPointF(5, 5), QPointF(spin->mapToGlobal(QPoint(5, 5))),
+                            QPoint(0, 120), QPoint(0, 120), Qt::NoButton,
+                            Qt::NoModifier, Qt::ScrollUpdate, false);
+        QCoreApplication::sendEvent(spin, &wheelUp);
+        CHECK_UI(spin->value() == before, "无焦点滚轮不修改参数");
+
+        // 聚焦后：滚轮照常调值（主动交互）
+        // 未显示的窗口不参与焦点链，先 show（offscreen 下安全）
+        panel.show();
+        spin->setFocus();
+        QApplication::processEvents();
+        CHECK_UI(spin->hasFocus(), "SpinBox 获得焦点");
+        QCoreApplication::sendEvent(spin, &wheelUp);
+        CHECK_UI(spin->value() != before, "聚焦后滚轮可调值");
+        spin->clearFocus();
     }
 
     /// 回归：默认算法为 SIFT + FLANN（现在由稀疏重建对话框承载）

@@ -7,6 +7,7 @@
  */
 
 #include "ParamFormGenerator.h"
+#include "ParamWheelFilter.h"
 
 #include <limits>
 
@@ -212,6 +213,8 @@ QWidget *ParamFormGenerator::createEditor(const ParamSchema &s)
                        (s.max.isValid() && s.max.canConvert<int>()) ? s.max.toInt()
                                                                    : std::numeric_limits<int>::max());
         spin->setValue(s.defaultValue.toInt());
+        // 悬停滚轮不改值（焦点门控，滚轮留给页面滚动）
+        spin->installEventFilter(new ParamWheelFilter(spin));
         QObject::connect(spin, QOverload<int>::of(&QSpinBox::valueChanged),
                          this, &ParamFormGenerator::valuesChanged);
         return spin;
@@ -223,6 +226,8 @@ QWidget *ParamFormGenerator::createEditor(const ParamSchema &s)
         spin->setRange((s.min.isValid() && s.min.canConvert<double>()) ? s.min.toDouble() : -1e6,
                        (s.max.isValid() && s.max.canConvert<double>()) ? s.max.toDouble() : 1e6);
         spin->setValue(s.defaultValue.toDouble());
+        // 悬停滚轮不改值（焦点门控，滚轮留给页面滚动）
+        spin->installEventFilter(new ParamWheelFilter(spin));
         QObject::connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                          this, &ParamFormGenerator::valuesChanged);
         return spin;
@@ -242,6 +247,8 @@ QWidget *ParamFormGenerator::createEditor(const ParamSchema &s)
         const int idx = combo->findData(s.defaultValue.toString());
         if (idx >= 0)
             combo->setCurrentIndex(idx);
+        // 悬停滚轮不切换（焦点门控，滚轮留给页面滚动）
+        combo->installEventFilter(new ParamWheelFilter(combo));
         QObject::connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                          this, &ParamFormGenerator::valuesChanged);
         return combo;
