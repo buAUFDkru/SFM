@@ -877,7 +877,7 @@ int run(const QString &pluginsDir)
                               QStringLiteral("DD-XFeat 提取合成球体特征 keypoints=%1 (>0)")
                                   .arg(r.keypoints.size()));
                         if (!r.descriptors.empty()) {
-                            check(r.descriptors.cols == 64 && r.descriptors.type() == CV_32F,
+                            check(r.descriptors.cols == 128 && r.descriptors.type() == CV_32F,
                                   QStringLiteral("DD-XFeat 描述子维度正确 (%1x%2 CV_32F)")
                                       .arg(r.descriptors.rows).arg(r.descriptors.cols));
                         }

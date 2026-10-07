@@ -51,6 +51,8 @@ private:
     int m_modelW = 0;     ///< 当前模型输入宽度
     int m_modelHd8 = 0;   ///< H/8
     int m_modelWd8 = 0;   ///< W/8
+    int m_descDim = 128;  ///< 描述符通道数（DD-XFeat 输出 128 维，XFeat 为 64 维；
+                          ///< 加载会话后从输出张量形状动态解析）
 
     // ── 可用模型列表：模型输入高度 → 文件路径 ──
     QMap<int, QString> m_availableModels;

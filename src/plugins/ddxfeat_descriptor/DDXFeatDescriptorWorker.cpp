@@ -222,6 +222,13 @@ bool DDXFeatDescriptorWorker::loadModelForHeight(int imageHeight)
     m_modelHd8 = m_modelH / 8;
     m_modelWd8 = m_modelW / 8;
 
+    // 解析描述符通道数：输出 0 形状 [1, H/8, W/8, C]，
+    // DD-XFeat 为 128 维（XFeat 64 维），按模型实际导出解析
+    auto out0Info = m_ortSession->GetOutputTypeInfo(0);
+    auto out0Shape = out0Info.GetTensorTypeAndShapeInfo().GetShape();
+    if (out0Shape.size() == 4 && out0Shape[3] > 0)
+        m_descDim = static_cast<int>(out0Shape[3]);
+
     if (m_modelH % 32 != 0 || m_modelW % 32 != 0) {
         qWarning() << "[DD-XFeat] 模型输入尺寸必须能被32整除";
         m_ortSession.reset();
@@ -333,21 +340,21 @@ bool DDXFeatDescriptorWorker::detectAndCompute(const cv::Mat &image, FeatureResu
     // ── 描述符提取 ──
     auto *descTensorPtr = outputTensors[0].GetTensorMutableData<float>();
 
-    // 归一化描述符（沿通道维度）
+    // 归一化描述符（沿通道维度，通道数 m_descDim）
     for (int i = 0; i < shw; ++i) {
         double sum = 0;
-        float *ptr = &descTensorPtr[i * 64];
-        for (int j = 0; j < 64; ++j) {
+        float *ptr = &descTensorPtr[i * m_descDim];
+        for (int j = 0; j < m_descDim; ++j) {
             sum += ptr[j] * ptr[j];
         }
         float invNorm = static_cast<float>(1.0 / std::max(std::sqrt(sum), 1e-12));
-        for (int j = 0; j < 64; ++j) {
+        for (int j = 0; j < m_descDim; ++j) {
             ptr[j] *= invNorm;
         }
     }
 
     // 双三次插值获取每个关键点的描述符
-    cv::Mat descs = cv::Mat::zeros(static_cast<int>(keys.size()), 64, CV_32F);
+    cv::Mat descs = cv::Mat::zeros(static_cast<int>(keys.size()), m_descDim, CV_32F);
     const float widthScale = static_cast<float>(m_modelWd8) / static_cast<float>(m_modelW - 1);
     const float heightScale = static_cast<float>(m_modelHd8) / static_cast<float>(m_modelH - 1);
 
@@ -478,25 +485,25 @@ void DDXFeatDescriptorWorker::interpDescriptor(const float *descMat, float *desc
     calcBicubicWeights(dx, wxm1, wx0, wx1, wx2);
     calcBicubicWeights(dy, wym1, wy0, wy1, wy2);
 
-    const float *desc_xm1_ym1 = descMat + ym1 * m_modelWd8 * 64 + xm1 * 64;
-    const float *desc_x0_ym1  = desc_xm1_ym1 + 64;
-    const float *desc_x1_ym1  = desc_x0_ym1 + 64;
-    const float *desc_x2_ym1  = desc_x1_ym1 + 64;
-    const float *desc_xm1_y0  = desc_xm1_ym1 + m_modelWd8 * 64;
-    const float *desc_x0_y0   = desc_xm1_y0 + 64;
-    const float *desc_x1_y0   = desc_x0_y0 + 64;
-    const float *desc_x2_y0   = desc_x1_y0 + 64;
-    const float *desc_xm1_y1  = desc_xm1_y0 + m_modelWd8 * 64;
-    const float *desc_x0_y1   = desc_xm1_y1 + 64;
-    const float *desc_x1_y1   = desc_x0_y1 + 64;
-    const float *desc_x2_y1   = desc_x1_y1 + 64;
-    const float *desc_xm1_y2  = desc_xm1_y1 + m_modelWd8 * 64;
-    const float *desc_x0_y2   = desc_xm1_y2 + 64;
-    const float *desc_x1_y2   = desc_x0_y2 + 64;
-    const float *desc_x2_y2   = desc_x1_y2 + 64;
+    const float *desc_xm1_ym1 = descMat + ym1 * m_modelWd8 * m_descDim + xm1 * m_descDim;
+    const float *desc_x0_ym1  = desc_xm1_ym1 + m_descDim;
+    const float *desc_x1_ym1  = desc_x0_ym1 + m_descDim;
+    const float *desc_x2_ym1  = desc_x1_ym1 + m_descDim;
+    const float *desc_xm1_y0  = desc_xm1_ym1 + m_modelWd8 * m_descDim;
+    const float *desc_x0_y0   = desc_xm1_y0 + m_descDim;
+    const float *desc_x1_y0   = desc_x0_y0 + m_descDim;
+    const float *desc_x2_y0   = desc_x1_y0 + m_descDim;
+    const float *desc_xm1_y1  = desc_xm1_y0 + m_modelWd8 * m_descDim;
+    const float *desc_x0_y1   = desc_xm1_y1 + m_descDim;
+    const float *desc_x1_y1   = desc_x0_y1 + m_descDim;
+    const float *desc_x2_y1   = desc_x1_y1 + m_descDim;
+    const float *desc_xm1_y2  = desc_xm1_y1 + m_modelWd8 * m_descDim;
+    const float *desc_x0_y2   = desc_xm1_y2 + m_descDim;
+    const float *desc_x1_y2   = desc_x0_y2 + m_descDim;
+    const float *desc_x2_y2   = desc_x1_y2 + m_descDim;
 
     double sum = 0;
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < m_descDim; ++i) {
         float v_m1 = wxm1 * desc_xm1_ym1[i] + wx0 * desc_x0_ym1[i]
                     + wx1 * desc_x1_ym1[i] + wx2 * desc_x2_ym1[i];
         float v_0  = wxm1 * desc_xm1_y0[i] + wx0 * desc_x0_y0[i]
@@ -511,7 +518,7 @@ void DDXFeatDescriptorWorker::interpDescriptor(const float *descMat, float *desc
     }
 
     float invNorm = static_cast<float>(1.0 / std::max(std::sqrt(sum), 1e-12));
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < m_descDim; ++i) {
         descriptor[i] *= invNorm;
     }
 }
