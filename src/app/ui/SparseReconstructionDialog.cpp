@@ -42,7 +42,7 @@ void SparseReconstructionDialog::setupUI()
 {
     setWindowTitle(tr("稀疏重建"));
     setModal(false);
-    setMinimumWidth(320);
+    setMinimumWidth(440);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -85,11 +85,12 @@ void SparseReconstructionDialog::setupUI()
     scroll->setWidget(content);
     layout->addWidget(scroll, /*stretch=*/1);
 
-    // 对话框高度不超过屏幕可用高度的 85%，避免超出屏幕
+    // 对话框高度不超过屏幕可用高度的 85%，避免超出屏幕；
+    // 初始尺寸取最小宽度 440（表单标签+控件需要余量，320 过窄）
     if (const QScreen *scr = this->screen()) {
         const int maxH = static_cast<int>(scr->availableGeometry().height() * 0.85);
         setMaximumHeight(maxH);
-        resize(minimumSizeHint().expandedTo(QSize(minimumWidth(), maxH / 2)));
+        resize(440, qMin(maxH, 640));
     }
 }
 
