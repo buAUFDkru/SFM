@@ -7,4 +7,5 @@ TEMPLATE = subdirs
 
 SUBDIRS = \
     xfeat_descriptor \
+    ddxfeat_descriptor \
     superpoint_descriptor
