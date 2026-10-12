@@ -1,11 +1,18 @@
 # SFM 3.0
 
-Windows 单机桌面三维重建软件（C++17 / Qt Widgets / qmake）。主流程为两步：
+Windows 单机桌面三维重建软件（C++17 / Qt Widgets / qmake），个人学习使用。主流程为两步：
 
 1. **稀疏重建**：特征提取 → 匹配 → 增量式 SfM / BA → 稀疏点云  
 2. **密集重建**：PatchMatch 立体匹配 → 深度融合 → 密集点云  
 
 工程按 `sfm3.0.pro` 拆为 `src/core`（静态库）、`src/plugins`（描述符等插件）、`src/app`（主界面）、`src/tests`（测试）。另附 `SFM3-PluginSDK` 供第三方插件开发。
+
+## 免编译下载
+
+无需安装 Qt / OpenCV 等开发库时，可直接下载 Windows 预编译包（解压后运行 `SFMReconstructor.exe`）：
+
+- Release 页面：https://github.com/buAUFDkru/SFM/releases/tag/v3.0.0-win64
+- 压缩包直链：https://github.com/buAUFDkru/SFM/releases/download/v3.0.0-win64/sfm.zip
 
 ## 依赖
 
