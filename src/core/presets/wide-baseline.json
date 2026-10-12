@@ -1,0 +1,32 @@
+{
+  "id": "wide-baseline",
+  "description": "大基线 / 低重叠：放宽建边与引导匹配门槛",
+  "descriptorType": "SIFT",
+  "descriptorParams": {
+    "nOctaveLayers": 3,
+    "contrastThreshold": 0.03,
+    "maxFeatures": 12288
+  },
+  "matcherType": "FLANN",
+  "matcherParams": {
+    "ratioThreshold": 0.85,
+    "minMatchCount": 20,
+    "minMatchRatio": 0.015,
+    "minNumInliers": 12,
+    "guidedMatching": true,
+    "guidedKnn": 7,
+    "guidedRatio": 0.92,
+    "guidedBelowInliers": 300,
+    "adaptiveEdgeThreshold": true,
+    "matchingMode": "auto",
+    "sequenceWindow": 14,
+    "exhaustiveMaxImages": 24
+  },
+  "threadCount": 0,
+  "baMaxIterations": 50,
+  "voxelSize": 0.01,
+  "useGpu": false,
+  "useExifFocal": true,
+  "refineDistortion": false,
+  "refineFocalPerAxis": false
+}

@@ -23,7 +23,6 @@
  */
 
 #include "Triangulate.h"
-#include "BundleAdjustment.h"
 #include "SfmGeometry.h"
 
 #include <QtMath>
@@ -37,18 +36,9 @@
 #include <opencv2/calib3d.hpp>
 #include <unordered_map>
 
-Triangulate *Triangulate::s_instance = nullptr;
-
-Triangulate *Triangulate::instance()
-{
-    if (!s_instance) {
-        s_instance = new Triangulate();
-    }
-    return s_instance;
-}
-
 Triangulate::Triangulate(QObject *parent)
     : QObject(parent)
+    , m_ba(std::make_unique<BundleAdjustment>())
 {
 }
 
@@ -640,7 +630,7 @@ void Triangulate::adjustLocalBundle(int imageId, const std::vector<int> &variabl
     }
 
     const std::chrono::steady_clock::time_point tBa = std::chrono::steady_clock::now();
-    BundleAdjustment::instance()->localBundleAdjustment(
+    m_ba->localBundleAdjustment(
         cameras, pointsArr, observations,
         m_K.at<double>(0, 0), m_K.at<double>(1, 1),
         m_K.at<double>(0, 2), m_K.at<double>(1, 2),
@@ -744,7 +734,7 @@ void Triangulate::runGlobalBundleAdjustment(bool fixIntrinsics)
         intrOpts.p2 = m_dist.at<double>(3);
     }
 
-    BundleAdjustment::instance()->globalBundleAdjustment(
+    m_ba->globalBundleAdjustment(
         cameras, pointsArr, observations, fx, fy, cx, cy,
         fixIntrinsics, m_refCameraId, &cameraVariable,
         m_options.baGlobalMaxIterations, &intrOpts);

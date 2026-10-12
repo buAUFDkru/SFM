@@ -19,16 +19,6 @@
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 
-BundleAdjustment *BundleAdjustment::s_instance = nullptr;
-
-BundleAdjustment *BundleAdjustment::instance()
-{
-    if (!s_instance) {
-        s_instance = new BundleAdjustment();
-    }
-    return s_instance;
-}
-
 BundleAdjustment::BundleAdjustment(QObject *parent)
     : QObject(parent)
 {

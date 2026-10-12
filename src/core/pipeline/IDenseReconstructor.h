@@ -2,13 +2,17 @@
 #define IDENSERECONSTRUCTOR_H
 
 #include <QString>
+#include <QList>
 #include <QMap>
 #include <QVariant>
 #include <functional>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include "algorithm/CancellationToken.h"
 #include "data/SfmTypes.h"
 #include "data/StereoTypes.h"
+#include "plugin/ParamSchema.h"
+#include "plugin/ParamSchemaUtils.h"
 
 /**
  * @brief 密集重建统一输入数据
@@ -76,6 +80,20 @@ public:
     virtual void setConfig(const QMap<QString, QVariant> &params) = 0;
 
     /**
+     * @brief 参数协议（UI / 校验 / 序列化的单一来源，与 ISfmPlugin 对齐）
+     */
+    virtual QList<ParamSchema> paramSchema() const = 0;
+
+    /**
+     * @brief 按 paramSchema() 校验参数；失败时返回 false 并写入 errorMsg
+     */
+    virtual bool validateParams(const QMap<QString, QVariant> &params,
+                                QString *errorMsg = nullptr) const
+    {
+        return sfm::validateParamsAgainstSchema(paramSchema(), params, errorMsg);
+    }
+
+    /**
      * @brief 设置日志回调
      * @param callback 日志回调函数，为空时表示不输出日志
      *
@@ -83,6 +101,17 @@ public:
      * 让 UI 能实时显示重建进度。
      */
     virtual void setLogCallback(LogCallback callback) { m_logCallback = std::move(callback); }
+
+    /**
+     * @brief 绑定取消令牌（ADR-003）
+     *
+     * 令牌由流水线持有；指针在 reconstruct() 期间必须有效。
+     * 传 nullptr 表示不可取消（默认）。
+     */
+    virtual void setCancellationToken(const sfm::CancellationToken *token)
+    {
+        m_cancel = token;
+    }
 
     /**
      * @brief 执行密集重建
@@ -93,11 +122,18 @@ public:
 
 protected:
     LogCallback m_logCallback;
+    const sfm::CancellationToken *m_cancel = nullptr;
 
     /// 便捷方法：若有日志回调则输出日志
     void log(const QString &message) const
     {
         if (m_logCallback) m_logCallback(message);
+    }
+
+    /// 是否已请求停止（无令牌时视为未停止）
+    bool isStopRequested() const noexcept
+    {
+        return m_cancel && m_cancel->isStopRequested();
     }
 };
 

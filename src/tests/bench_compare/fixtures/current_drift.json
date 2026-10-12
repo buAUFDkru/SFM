@@ -1,0 +1,27 @@
+{
+    "schemaVersion": 1,
+    "layer": "self",
+    "datasetId": "fixture_synth",
+    "datasetPath": "D:/data/fixture_synth",
+    "timestamp": "2026-10-10T02:00:00Z",
+    "metrics": {
+        "registrationRate": 0.75,
+        "totalPoints": 400,
+        "medianReprojectionError": 2.5,
+        "peakMemoryMb": 900.0,
+        "stageTimingsMs": {
+            "feature_extract": 1000.0,
+            "matching": 2000.0,
+            "initialization": 50.0,
+            "incremental": 3000.0,
+            "total": 12000.0
+        }
+    },
+    "extras": {
+        "numImages": 4,
+        "registeredCameras": 3,
+        "matchPairs": 6,
+        "mainComponentSize": 4
+    },
+    "benchmarkLayer": {}
+}

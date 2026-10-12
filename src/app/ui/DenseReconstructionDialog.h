@@ -30,11 +30,13 @@ private:
     void setupUI();
     void rebuildMethods();
     void updateParamsForCurrentMethod();
+    void onAccepted();
 
     QComboBox *m_methodCombo = nullptr;
     ParamFormGenerator *m_form = nullptr;
     QDialogButtonBox *m_buttonBox = nullptr;
 
+    QString m_currentMethod;
     QMap<QString, QMap<QString, QVariant>> m_methodParams;
 };
 

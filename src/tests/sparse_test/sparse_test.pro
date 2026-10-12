@@ -1,13 +1,15 @@
-# sparse_test.pro —— 稀疏重建（阶段一健壮性改造）回归测试
+# sparse_test —— 稀疏重建健壮性回归（QtTest）
 TEMPLATE = app
-CONFIG  += console
+CONFIG  += testcase console
 CONFIG  -= app_bundle
 TARGET   = sparse_test
 
-# 启用算法链依赖（Ceres/PCL/Open3D），与 core 保持一致
+# 需要算法链依赖（Ceres/PCL/Open3D），与 core 链接一致
 SFM3_ALG_DEPS = 1
 
 include(../../../common.pri)
+
+QT += testlib core
 
 INCLUDEPATH += ../../core
 

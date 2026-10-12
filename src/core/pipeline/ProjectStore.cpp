@@ -5,6 +5,12 @@
 
 #include "ProjectStore.h"
 
+#include "algorithm/MatcherService.h"
+#include "plugin/IDescriptorPlugin.h"
+#include "plugin/IMatcherPlugin.h"
+#include "plugin/ParamSchemaUtils.h"
+#include "plugin/PluginRegistry.h"
+
 #include <QDataStream>
 #include <QDir>
 #include <QFile>
@@ -16,7 +22,7 @@
 
 namespace {
 
-constexpr int kManifestVersion = 1;
+constexpr int kManifestVersion = 2;
 constexpr int kPosesVersion = 1;
 // v2：MatchPair 新增本质矩阵 E 与两视图几何配置 geometryConfig（阶段三）
 constexpr int kPairsVersion = 2;
@@ -67,6 +73,40 @@ cv::Mat poseMatOrIdentity(const cv::Mat &m, int rows, int cols, bool identity)
 
 namespace ProjectStore {
 
+void migrateManifestCoordinateFrame(ProjectManifest &m)
+{
+    if (!m.coordinateFrame.isEmpty())
+        return;
+    m.coordinateFrame = (m.formatVersion >= 2) ? QStringLiteral("opencv")
+                                               : QStringLiteral("display");
+}
+
+void normalizeManifestAlgorithms(ProjectManifest &m, const PluginRegistry *registry,
+                                 QString *warn)
+{
+    migrateManifestCoordinateFrame(m);
+    if (!registry)
+        return;
+
+    if (!m.descriptorType.isEmpty()) {
+        if (IDescriptorPlugin *desc = registry->descriptorPlugin(m.descriptorType)) {
+            const QList<ParamSchema> schemas = desc->paramSchema();
+            m.descriptorParams = sfm::sanitizeParamsAgainstSchema(
+                schemas, m.descriptorParams, warn);
+            m.descriptorParams = sfm::fillParamsFromSchema(schemas, m.descriptorParams);
+        }
+    }
+
+    if (!m.matcherType.isEmpty()) {
+        QList<ParamSchema> schemas = MatcherService::orchestrationParamSchema();
+        if (IMatcherPlugin *matcher = registry->matcherPlugin(m.matcherType))
+            schemas = sfm::mergeParamSchemas(schemas, matcher->paramSchema());
+        m.matcherParams =
+            sfm::sanitizeParamsAgainstSchema(schemas, m.matcherParams, warn);
+        m.matcherParams = sfm::fillParamsFromSchema(schemas, m.matcherParams);
+    }
+}
+
 QString manifestPath(const QString &projectDir, const QString &projectName)
 {
     return QDir(projectDir).filePath(projectName + QStringLiteral(".sfmproj"));
@@ -90,7 +130,10 @@ bool writeManifest(const QString &projectDir, const ProjectManifest &m, QString 
     }
 
     QJsonObject root;
-    root[QStringLiteral("formatVersion")] = kManifestVersion;
+    root[QStringLiteral("formatVersion")] =
+        m.formatVersion > 0 ? m.formatVersion : kManifestVersion;
+    root[QStringLiteral("coordinateFrame")] =
+        m.coordinateFrame.isEmpty() ? QStringLiteral("opencv") : m.coordinateFrame;
     root[QStringLiteral("name")] = m.name;
     root[QStringLiteral("createdAt")] = m.createdAt.toString(Qt::ISODate);
     root[QStringLiteral("modifiedAt")] = m.modifiedAt.toString(Qt::ISODate);
@@ -154,7 +197,8 @@ bool readManifest(const QString &projectDir, const QString &projectName,
     }
 
     ProjectManifest m;
-    m.formatVersion = root.value(QStringLiteral("formatVersion")).toInt(kManifestVersion);
+    m.formatVersion = root.value(QStringLiteral("formatVersion")).toInt(1);
+    m.coordinateFrame = root.value(QStringLiteral("coordinateFrame")).toString();
     m.name = root.value(QStringLiteral("name")).toString(projectName);
     m.createdAt = QDateTime::fromString(root.value(QStringLiteral("createdAt")).toString(), Qt::ISODate);
     m.modifiedAt = QDateTime::fromString(root.value(QStringLiteral("modifiedAt")).toString(), Qt::ISODate);
@@ -188,6 +232,8 @@ bool readManifest(const QString &projectDir, const QString &projectName,
     m.totalPoints = results.value(QStringLiteral("totalPoints")).toInt();
     m.reprojectionError = results.value(QStringLiteral("reprojectionError")).toDouble();
     m.totalElapsedMs = results.value(QStringLiteral("totalElapsedMs")).toDouble();
+
+    migrateManifestCoordinateFrame(m);
 
     *out = m;
     return true;

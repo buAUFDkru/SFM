@@ -1,0 +1,33 @@
+{
+  "id": "outdoor",
+  "description": "户外/航测默认稀疏匹配预设（与 default 同内容）",
+  "notes": "matcher 不写 ransacThreshold：由 MatcherService 按分辨率自适应",
+  "descriptorType": "SIFT",
+  "descriptorParams": {
+    "nOctaveLayers": 3,
+    "contrastThreshold": 0.04,
+    "maxFeatures": 8192
+  },
+  "matcherType": "FLANN",
+  "matcherParams": {
+    "ratioThreshold": 0.8,
+    "minMatchCount": 30,
+    "minMatchRatio": 0.02,
+    "minNumInliers": 15,
+    "guidedMatching": true,
+    "guidedKnn": 5,
+    "guidedRatio": 0.9,
+    "guidedBelowInliers": 500,
+    "adaptiveEdgeThreshold": true,
+    "matchingMode": "auto",
+    "sequenceWindow": 10,
+    "exhaustiveMaxImages": 20
+  },
+  "threadCount": 0,
+  "baMaxIterations": 50,
+  "voxelSize": 0.01,
+  "useGpu": false,
+  "useExifFocal": true,
+  "refineDistortion": false,
+  "refineFocalPerAxis": false
+}

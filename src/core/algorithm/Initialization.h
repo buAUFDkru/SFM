@@ -28,11 +28,13 @@ struct InitResult
     std::vector<cv::DMatch> inlierMatches; ///< 内点匹配索引列表
     double score;                          ///< 综合评分（内点数 × 角度权重 × 模型加分）
     double baseline;                       ///< 基线长度 ‖t‖₂（用于评估重建质量）
-    double medianAngle;                    ///< 中位三角化角度（度），最优区间5°-10°
+    double medianAngle;                    ///< 中位三角化角度（度），优先区间约16°-30°（COLMAP）
 };
 
 /**
- * @brief 初始化类 —— 增量式SFM的初始化阶段（单例）
+ * @brief 初始化类 —— 增量式SFM的初始化阶段
+ *
+ * 无跨调用可变状态，可栈上构造（ADR-003 DI）。
  *
  * 负责在增量式SFM重建开始前完成以下关键步骤：
  *
@@ -50,20 +52,22 @@ struct InitResult
  *    - recoverPoseFromF：从F矩阵通过本质矩阵E分解得到R、t
  *    - recoverPoseFromH：从H矩阵分解得到R、t，通过正深度验证选最优解
  *
- * ### 基线评分原理（参考COLMAP策略）
+ * ### 基线评分原理（参考 COLMAP init_min_tri_angle=16°）
  *
  * 好的初始化基线需要在深度精度和匹配可靠性之间取得平衡：
- * - 基线太短 → 三角化角度小 → 深度估计不确定性大
+ * - 基线太短 → 三角化角度小 → 深度估计不确定性大（无人机相邻帧常见 ~6°）
  * - 基线太长 → 视角差异大 → 特征匹配困难、外点多
- * - 最优基线/深度比 ≈ 0.1，对应约5°-10°三角化角度
+ * - COLMAP 对种子对硬性要求中位三角化角 > 16°；本实现以 16°–30° 为权重峰值，
+ *   并在存在 ≥12° 候选时屏蔽弱视差对，避免高内点相邻帧压过宽基线对
  *
  * 角度权重函数：
  * ```
- *   angle < 1°   → 权重=0（退化：纯旋转或基线过短）
- *   1° ≤ angle < 5°  → 权重线性增长（0→1）
- *   5° ≤ angle ≤ 10° → 权重=1（最优区间）
- *   10° < angle ≤ 20° → 权重线性衰减（1→0）
- *   angle > 20°  → 权重=0（基线过宽，匹配不可靠）
+ *   angle < 5°        → 权重=0（退化）
+ *   5° ≤ angle < 12°  → 弱权重（仅兜底）
+ *   12° ≤ angle < 16° → 爬升到 1
+ *   16° ≤ angle ≤ 30° → 权重=1（优先区间）
+ *   30° < angle ≤ 60° → 缓降到 0.5
+ *   angle > 60°       → 继续缓降（保留大视角区分度）
  * ```
  */
 class Initialization : public QObject
@@ -71,11 +75,8 @@ class Initialization : public QObject
     Q_OBJECT
 
 public:
-    /**
-     * @brief 获取单例实例
-     * @return Initialization单例指针
-     */
-    static Initialization *instance();
+    explicit Initialization(QObject *parent = nullptr);
+    ~Initialization() override = default;
 
     /**
      * @brief 寻找最优初始化图像对
@@ -199,20 +200,8 @@ public:
                           cv::Mat &R, cv::Mat &t);
 
 private:
-    /**
-     * @brief 私有构造函数（单例模式）
-     */
-    explicit Initialization(QObject *parent = nullptr);
-
-    /**
-     * @brief 析构函数
-     */
-    ~Initialization() override = default;
-
     Initialization(const Initialization &) = delete;
     Initialization &operator=(const Initialization &) = delete;
-
-    static Initialization *s_instance;  ///< 单例指针
 };
 
 #endif // INITIALIZATION_H

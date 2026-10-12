@@ -6,11 +6,10 @@
 #include <QStringList>
 #include <QVariant>
 #include <QVector>
-#include <atomic>
 #include <chrono>
 #include <mutex>
-#include <thread>
 
+#include "algorithm/ProgressSink.h"
 #include "ReconstructionPipeline.h"
 
 class ReconstructionPipeline;
@@ -21,18 +20,12 @@ class ReconstructionPipeline;
  * 负责在工作线程中执行 ReconstructionPipeline 的各个阶段，
  * 并通过 Qt 信号将进度/日志/点云等事件发回主线程 UI。
  *
- * ReconstructionPipeline 本身不继承 QObject，此 Worker 是它唯一的"线程外壳"。
- *
- * 日志批量刷新机制：
- * 线程池工作线程产生的日志通过 onLog() 进入缓冲区 m_logBuffer。
- * 当缓冲区达到一定数量或距上次刷新超过一定时间时，
- * 直接 emit logBatchEmitted（通过 Qt::QueuedConnection 投递到 UI 线程）。
- * 不依赖 QTimer，因为 Worker 线程在 execute() 期间不运行事件循环，
- * QTimer 的 timeout 事件无法被处理。
- * 刷新由独立监视线程周期触发（startFlushMonitor/stopFlushMonitor），
- * 避免长静默阶段（如特征提取数分钟无日志）时缓冲的日志滞留不显示。
+ * 同时实现 ProgressSink（ADR-003）：进度/日志优先经 Pipeline::setProgressSink 注入；
+ * 日志批量缓冲，在 batchSize / onStage / flush() 时刷出，不再使用监视线程。
  */
-class ReconstructionWorker : public QObject, public IReconstructionCallbacks
+class ReconstructionWorker : public QObject,
+                             public IReconstructionCallbacks,
+                             public sfm::ProgressSink
 {
     Q_OBJECT
 
@@ -59,13 +52,17 @@ public:
     /// 设置自动保存目录；非空时完成重建后自动保存点云
     void setAutoSaveDirectory(const QString &dir);
 
-    // --- IReconstructionCallbacks 实现 ---
+    // --- IReconstructionCallbacks ---
     void onProgress(const QString &stage, int percent) override;
     void onLog(const QString &message) override;
     void onStagePointCloudReady(const QVector<float> &points,
                                 const QVector<float> &colors,
                                 const QString &stageName) override;
     void onDenseReconstructionMethodRequested() override;
+
+    // --- ProgressSink ---
+    void onStage(const QString &stage, int percent) override;
+    void flush() override;
 
 signals:
     void progressChanged(const QString &stage, int percent);
@@ -79,34 +76,18 @@ signals:
     void finished(bool success);
 
 private:
-    /// 检查是否需要刷新缓冲区（按数量或时间阈值），需要则发射 logBatchEmitted
     void maybeFlushLog(bool force = false);
-
-    /// 启动日志刷新监视线程：execute() 期间周期调用 maybeFlushLog()，
-    /// 保证静默阶段已缓冲的日志也能及时显示
-    void startFlushMonitor();
-
-    /// 停止并等待监视线程退出
-    void stopFlushMonitor();
-
     void autoSaveIfNeeded();
 
     ReconstructionPipeline *m_pipeline;
     bool m_running = false;
     QString m_autoSaveDir;
 
-    // 日志批量刷新：缓冲区 + 时间/数量阈值
-    // 不使用 QTimer，因为 Worker 线程在 execute() 期间不运行事件循环。
-    // 通过时间戳判断：距上次刷新超过 flushIntervalMs 或缓冲区达到 flushBatchSize 时触发。
     std::mutex m_logMutex;
     QStringList m_logBuffer;
     std::chrono::steady_clock::time_point m_lastFlushTime;
-    const int flushIntervalMs = 200;   // 最小刷新间隔
-    const int flushBatchSize = 10;     // 缓冲区达到此数量时强制刷新
-
-    // 刷新监视线程（仅 execute() 期间存活）
-    std::thread m_flushMonitor;
-    std::atomic<bool> m_flushMonitorActive{false};
+    const int flushIntervalMs = 200;
+    const int flushBatchSize = 10;
 };
 
 #endif // RECONSTRUCTIONWORKER_H

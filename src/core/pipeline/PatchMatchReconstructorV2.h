@@ -2,6 +2,8 @@
 #define PATCHMATCHRECONSTRUCTORV2_H
 
 #include "IDenseReconstructor.h"
+#include "algorithm/dense/PatchMatchTypes.h"
+#include "algorithm/dense/strategies.h"
 #include "data/StereoTypes.h"
 
 #include <QString>
@@ -378,22 +380,12 @@ public:
     QString displayName() const override { return QStringLiteral("PatchMatch 优化版（多尺度+平面先验）"); }
 
     void setConfig(const QMap<QString, QVariant> &params) override;
+    QList<ParamSchema> paramSchema() const override;
     DenseReconstructionOutput reconstruct(const DenseReconstructionInput &input) override;
 
 private:
-    /// 源视图预计算数据（避免重复加载和转换）
-    ///
-    /// 相机参数以 POD 数组（行主序）保存，而不是 cv::Mat：
-    /// computePixelCost 是最内层热点（每像素 × 每迭代 × 每源视图），
-    /// Mat::at<double>() 每次都要重算 data + step*i 间接寻址，
-    /// 且 cv::Mat 头部会拖累 SourceView 的缓存局部性。
-    struct SourceView {
-        cv::Mat gray;       ///< 源灰度图（CV_8UC1）
-        double K[9] = {};   ///< 源相机内参（已按缩放调整），K[r*3+c]
-        double R[9] = {};   ///< 相对旋转 R_src * R_ref^T，R[r*3+c]
-        double T[3] = {};   ///< 相对平移 t_src - R_src * R_ref^T * t_ref
-        int imageIdx = -1;  ///< 源图像在 input.imageFiles 中的索引（诊断用）
-    };
+    /// 源视图：POD 相机参数（见 sfm::dense::SourceViewPod）
+    using SourceView = sfm::dense::SourceViewPod;
 
     /// PatchMatch 运行时上下文（避免长参数列表）
     struct Context {
@@ -485,12 +477,9 @@ private:
                            float nx, float ny, float nz,
                            const Context &ctx) const;
 
-    /// 双线性采样灰度图（越界返回 -1 表示无效）
-    static inline float sampleGrayBilinear(const cv::Mat &gray, float x, float y);
-
     /// 深度融合：跨视图去重 + 置信度加权平均（COLMAP fusion 思路）
     ///
-    /// 非融合路径（backprojectDepth）把每个视图的深度图独立反投影、直接拼接，
+    /// 非融合路径（sfm::dense::backprojectDepth）把每个视图的深度图独立反投影、直接拼接，
     /// 同一表面在 N 个视图里就出现 N 次，且各副本位置略有差异（噪点增厚）。
     /// 本方法对每个有效深度像素：反投影 → 投影到 K 个近邻视图 → 深度一致的
     /// 邻居视为同一表面的重复观测，把所有观测（含自身）按 1/(1+代价) 加权
@@ -503,17 +492,8 @@ private:
                        sfm::ThreadPool &pool,
                        pcl::PointCloud<pcl::PointXYZRGB> &cloud) const;
 
-    /// 将多张源视图匹配得到的深度图融合为一张
-    cv::Mat fuseSourceDepthMaps(const cv::Mat &refImage,
-                                const std::vector<cv::Mat> &srcDepths,
-                                const std::vector<cv::Mat> &srcConfidences) const;
-
-    /// 从参考图像深度图反投影到世界坐标系，追加到点云
-    void backprojectDepth(const DenseReconstructionInput &input,
-                          int refIdx,
-                          const cv::Mat &depth,
-                          const cv::Mat &refImage,
-                          pcl::PointCloud<pcl::PointXYZRGB> &cloud) const;
+    /// ADR-004 具名预设（棋盘 + NCC + 平面先验 + JBU 标记）
+    sfm::dense::PatchMatchStrategySet m_strategies = sfm::dense::presetCheckerboard();
 };
 
 #endif // PATCHMATCHRECONSTRUCTORV2_H

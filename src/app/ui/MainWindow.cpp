@@ -34,10 +34,12 @@
 #include <QThread>
 #include <QToolButton>
 
-#include <opencv2/core.hpp>
+#include "pipeline/ReconstructionPipeline.h"
+#include "viewmodel/FrustumBuilder.h"
 
 #include <algorithm>
-#include <limits>
+#include <string>
+#include <vector>
 
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
@@ -121,16 +123,16 @@ void MainWindow::runPipelineSyncForTest()
         {QStringLiteral("filter"), false},
     };
     m_pipeline->setConfig(cfg);
-    ReconstructionOutput output = m_pipeline->execute();
+    m_pipeline->execute();
 
     // 与 UI 路径（onPipelineFinished）保持一致：重建成功后自动保存项目，
     // 并完成点云显示与显示选项复选框同步（测试直调路径无回调事件）
-    if (output.sparseCloud && !output.sparseCloud->empty() && !m_projectDir.isEmpty()) {
+    if (m_pipeline->hasCloud(false) && !m_projectDir.isEmpty()) {
         m_pipeline->saveProject();
         m_dirty = false;
         updateTitle();
     }
-    if (output.sparseCloud && !output.sparseCloud->empty())
+    if (m_pipeline->hasCloud(false))
         loadAndDisplayCloudFromOutput();
 }
 
@@ -814,42 +816,31 @@ void MainWindow::loadAndDisplayCloudFromOutput()
 
 bool MainWindow::cloudAvailable(bool dense) const
 {
-    if (!m_pipeline)
-        return false;
-    const ReconstructionOutput &output = m_pipeline->lastOutput();
-    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud =
-        dense ? output.denseCloud : output.sparseCloud;
-    return cloud && !cloud->empty();
+    return m_pipeline && m_pipeline->hasCloud(dense);
 }
 
 void MainWindow::displayCloudFromOutput(bool dense)
 {
     if (!m_pipeline)
         return;
-    const ReconstructionOutput &output = m_pipeline->lastOutput();
-    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud =
-        dense ? output.denseCloud : output.sparseCloud;
+    const sfm::view::ReconstructionView view = m_pipeline->lastView();
+    const sfm::view::PointCloudView &cloud = dense ? view.dense : view.sparse;
 
-    if (!cloud || cloud->empty()) {
+    if (cloud.empty()) {
         m_logConsole->appendInfo(tr("点云为空，无法显示"));
         return;
     }
 
-    QVector<float> points, colors;
-    const size_t n = cloud->size();
-    const size_t step = (n > 5000000) ? n / 5000000 : 1;
-    points.reserve(static_cast<int>(n / step) * 3);
-    colors.reserve(static_cast<int>(n / step) * 3);
-    for (size_t i = 0; i < n; i += step) {
-        const auto &pt = cloud->points[i];
-        points.append(pt.x);
-        points.append(pt.y);
-        points.append(pt.z);
-        colors.append(pt.r / 255.0f);
-        colors.append(pt.g / 255.0f);
-        colors.append(pt.b / 255.0f);
-    }
+    const QVector<float> points(cloud.positions.begin(), cloud.positions.end());
+    const QVector<float> colors(cloud.colors.begin(), cloud.colors.end());
     m_pointCloudWidget->updatePointCloud(points, colors, true);
+}
+
+sfm::view::ReconstructionView MainWindow::lastView() const
+{
+    if (!m_pipeline)
+        return {};
+    return m_pipeline->lastView();
 }
 
 void MainWindow::syncCloudDisplayChecks(bool denseSelected)
@@ -868,57 +859,24 @@ CameraFrustumGeometry MainWindow::cameraFrustumGeometry(const std::vector<Camera
                                                         float depth,
                                                         const QStringList &imageFiles)
 {
+    std::vector<std::string> paths;
+    paths.reserve(static_cast<size_t>(imageFiles.size()));
+    for (const QString &f : imageFiles)
+        paths.push_back(f.toStdString());
+
+    const sfm::view::CameraFrustumView v =
+        sfm::view::buildCameraFrusta(poses, depth, paths);
+
     CameraFrustumGeometry geom;
-    if (depth <= 0.0f)
-        return geom;
-
-    for (const auto &pose : poses) {
-        if (!pose.registered || pose.R.empty() || pose.t.empty())
-            continue;
-
-        // 金字塔底面四角（相机系，光心为原点、看 +z；保持图像宽高比）
-        const double hw = 0.5 * depth;
-        const double hh = 0.5 * depth *
-                          (pose.imageWidth > 0 && pose.imageHeight > 0
-                               ? double(pose.imageHeight) / pose.imageWidth
-                               : 0.75);
-        const double camCorners[4][3] = {
-            {-hw, -hh, depth}, {hw, -hh, depth}, {hw, hh, depth}, {-hw, hh, depth}};
-
-        const cv::Mat Rt = pose.R.t();
-        const cv::Mat C = -Rt * pose.t;   // 光心（世界系）
-
-        // 显示坐标系转换：OpenCV → 显示系（绕 Y 轴 180°，x、z 取反，y 保持），
-        // 与点云组装时的转换一致，否则金字塔与点云错位
-        const auto toDisplay = [](const cv::Mat &v) {
-            return QVector3D(float(-v.at<double>(0)),
-                             float(v.at<double>(1)),
-                             float(-v.at<double>(2)));
-        };
-
-        const QVector3D center = toDisplay(C);
-        QVector3D corners[4];
-        for (int i = 0; i < 4; ++i) {
-            const cv::Mat v = Rt * (cv::Mat_<double>(3, 1) << camCorners[i][0],
-                                    camCorners[i][1], camCorners[i][2]) + C;
-            corners[i] = toDisplay(v);
-            geom.quadCorners << corners[i];
-        }
-
-        const auto appendSegment = [&geom](const QVector3D &a, const QVector3D &b) {
-            geom.lines << a.x() << a.y() << a.z() << b.x() << b.y() << b.z();
-        };
-        // 光心 → 四角（4 条）+ 底面四边（4 条）
-        for (int i = 0; i < 4; ++i)
-            appendSegment(center, corners[i]);
-        for (int i = 0; i < 4; ++i)
-            appendSegment(corners[i], corners[(i + 1) % 4]);
-
-        // 图像路径（imageId 越界视为无图）
-        geom.imagePaths << (pose.imageId >= 0 && pose.imageId < imageFiles.size()
-                                ? imageFiles.at(pose.imageId)
-                                : QString());
+    geom.lines = QVector<float>(v.lineSegments.begin(), v.lineSegments.end());
+    geom.quadCorners.reserve(static_cast<int>(v.quadCorners.size() / 3));
+    for (size_t i = 0; i + 2 < v.quadCorners.size(); i += 3) {
+        geom.quadCorners.append(QVector3D(v.quadCorners[i],
+                                          v.quadCorners[i + 1],
+                                          v.quadCorners[i + 2]));
     }
+    for (const auto &p : v.imagePaths)
+        geom.imagePaths.append(QString::fromStdString(p));
     return geom;
 }
 
@@ -932,36 +890,23 @@ void MainWindow::updateCameraFrustaFromOutput()
 {
     if (!m_pipeline)
         return;
-    const ReconstructionOutput &output = m_pipeline->lastOutput();
-
-    // 金字塔深度取点云包围盒最大边长的 12%（无点云时保持单位深度）
-    float depth = 1.0f;
-    if (output.sparseCloud && !output.sparseCloud->empty()) {
-        cv::Vec3d mn(std::numeric_limits<double>::max(),
-                     std::numeric_limits<double>::max(),
-                     std::numeric_limits<double>::max());
-        cv::Vec3d mx(-mn[0], -mn[1], -mn[2]);
-        for (const auto &pt : output.sparseCloud->points) {
-            mn[0] = std::min(mn[0], double(pt.x));
-            mn[1] = std::min(mn[1], double(pt.y));
-            mn[2] = std::min(mn[2], double(pt.z));
-            mx[0] = std::max(mx[0], double(pt.x));
-            mx[1] = std::max(mx[1], double(pt.y));
-            mx[2] = std::max(mx[2], double(pt.z));
-        }
-        depth = float(0.12 * std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]}));
-        if (depth <= 0.0f)
-            depth = 1.0f;
-    }
-
-    const QStringList imageFiles = m_pipeline->config().imageFiles;
-    const CameraFrustumGeometry geom = cameraFrustumGeometry(output.cameraPoses, depth, imageFiles);
-    if (geom.lines.isEmpty()) {
+    const sfm::view::ReconstructionView view = m_pipeline->lastView();
+    if (view.frusta.lineSegments.empty()) {
         m_pointCloudWidget->clearCameraFrusta();
         return;
     }
 
-    // 青色线框，与点云形成对比
+    CameraFrustumGeometry geom;
+    geom.lines = QVector<float>(view.frusta.lineSegments.begin(),
+                                 view.frusta.lineSegments.end());
+    for (size_t i = 0; i + 2 < view.frusta.quadCorners.size(); i += 3) {
+        geom.quadCorners.append(QVector3D(view.frusta.quadCorners[i],
+                                          view.frusta.quadCorners[i + 1],
+                                          view.frusta.quadCorners[i + 2]));
+    }
+    for (const auto &p : view.frusta.imagePaths)
+        geom.imagePaths.append(QString::fromStdString(p));
+
     QVector<float> frustaColors;
     frustaColors.reserve(geom.lines.size());
     for (int i = 0; i < geom.lines.size() / 3; ++i)

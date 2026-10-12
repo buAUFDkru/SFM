@@ -12,10 +12,15 @@
 #include <memory>
 #include <mutex>
 
-#include "data/ReconstructionOutput.h"
+#include "algorithm/CancellationToken.h"
+#include "algorithm/ProgressSink.h"
 #include "data/SfmTypes.h"
 #include "data/StereoTypes.h"
 #include "pipeline/ProjectStore.h"
+#include "viewmodel/RenderModel.h"
+
+class Triangulate;
+struct ReconstructionOutput; ///< core 内部类型（含 PCL），见 ReconstructionOutput.h
 
 /**
  * @brief 重建配置结构体
@@ -32,52 +37,26 @@ struct ReconstructionConfig
     QString denseReconstructionMethod;          ///< 密集重建方法名（空表示在稀疏重建后询问用户）
     QMap<QString, QVariant> denseReconstructionParams; ///< 方法特有参数
 
-    QString descriptorType = "SIFT";            ///< 描述符插件 id
-    QJsonObject descriptorParams{
-        {"nOctaveLayers", 3},
-        {"contrastThreshold", 0.04},
-        {"maxFeatures", 8192},
-    };
+    /// 描述符/匹配器调优默认值见 presets/*.json（ADR-002），经
+    /// makeDefaultReconstructionConfig() / loadBuiltinReconstructionPreset 注入。
+    QString descriptorType = "SIFT"; ///< 描述符插件 id（语言级缺省）
+    QJsonObject descriptorParams;    ///< 由预设或 UI 填充
 
-    QString matcherType = "FLANN";              ///< 匹配器插件 id
-    QJsonObject matcherParams{
-        {"ratioThreshold", 0.8},
-        // 不写 ransacThreshold：交由 MatcherService 按图像分辨率自适应
-        // （长边 4000 → 4px，1000 → 1px）。需要手工干预时再显式指定该键。
-        // 建边阈值放宽：大视角数据集单对内点数天然偏少，原先 50 / 0.05 过严
-        {"minMatchCount", 30},
-        {"minMatchRatio", 0.02},
-        // 阶段三：已知 K 直接估 E + 引导匹配 + 建边阈值自适应阶梯
-        {"minNumInliers", 15},
-        {"guidedMatching", true},
-        {"guidedKnn", 5},
-        {"guidedRatio", 0.9},
-        {"guidedBelowInliers", 500},
-        {"adaptiveEdgeThreshold", true},
-        // 匹配模式：auto 表示小规模数据集（≤ exhaustiveMaxImages，默认 20）
-        // 自动走穷举，避免序列窗口漏掉真实重叠对；更大规模走序列窗口 +
-        // 传递性匹配（穷举 O(N²) 对数在 20 图以上膨胀过快，边际增益递减）
-        {"matchingMode", "auto"},
-        {"sequenceWindow", 10},
-        {"exhaustiveMaxImages", 20},
-    };
+    QString matcherType = "FLANN"; ///< 匹配器插件 id（语言级缺省）
+    QJsonObject matcherParams;     ///< 由预设或 UI 填充
 
-    int threadCount = 0;  ///< 线程池线程数；0 表示使用物理核心数近似值
+    int threadCount = 0; ///< 线程池线程数；0 表示使用物理核心数近似值
 
-    int baMaxIterations = 50;   ///< 保留字段（sfm2.0 兼容），BA 内部使用固定迭代
-    double voxelSize = 0.01;    ///< 保留字段（点云下采样粒度）
+    int baMaxIterations = 50; ///< 保留字段（sfm2.0 兼容），BA 内部使用固定迭代
+    double voxelSize = 0.01;  ///< 保留字段（点云下采样粒度）
     bool useGpu = false;
 
-    cv::Mat cameraMatrix;  ///< 外部提供的相机内参矩阵（空则自动估计）
-    bool fixCameraMatrix = false;  ///< 若从cameramatrix.txt读取，则全局BA不优化内参
+    cv::Mat cameraMatrix;         ///< 外部提供的相机内参矩阵（空则自动估计）
+    bool fixCameraMatrix = false; ///< 若从 cameramatrix.txt 读取，则全局 BA 不优化内参
 
-    // ── 阶段五：相机模型 ──────────────────────────────────────────────────
-    /// 5.1 优先用 EXIF 的 35mm 等效焦距反推 K 初值（无 EXIF 时回落 60°FOV 估计）
+    // ── 阶段五：相机模型（布尔语义缺省；业务组合见预设）────────────────
     bool useExifFocal = true;
-    /// 5.2 全局 BA 中联合精化径向/切向畸变 k1,k2,p1,p2（需注册相机数足够多才启用）
-    /// 默认关闭：实机对照显示打开后重投影更优但点数腰斩
     bool refineDistortion = false;
-    /// 5.3 允许 fx ≠ fy（像素非正方形 / 主点方向标定不准时更贴合）
     bool refineFocalPerAxis = false;
 };
 
@@ -130,7 +109,12 @@ public:
     /// 设置回调接口（非线程安全，应在执行前设置）
     void setCallbacks(IReconstructionCallbacks *callbacks);
 
-    ReconstructionOutput execute();
+    /// 进度/日志出口（ADR-003）；优先于 IReconstructionCallbacks::onProgress/onLog
+    void setProgressSink(sfm::ProgressSink *sink);
+    sfm::ProgressSink *progressSink() const { return m_progress; }
+
+    /// 执行完整流水线；结果写入 lastOutput() / lastView()
+    void execute();
 
     /// 仅执行稀疏重建（阶段 1-4），结果保存在内部状态中
     bool executeSparseReconstruction();
@@ -169,7 +153,18 @@ public:
     /// 打开项目后的清单（未打开时无效，需先判断 loadProject 返回值）
     const ProjectManifest &manifest() const { return m_manifest; }
 
-    const ReconstructionOutput &lastOutput() const { return m_lastOutput; }
+    /// core 内部输出（含 PCL）；UI 请用 lastView()
+    const ReconstructionOutput &lastOutput() const;
+
+    /// 渲染边界视图（无第三方类型，显示坐标系）
+    sfm::view::ReconstructionView lastView() const;
+
+    /// 稀疏/密集点云是否非空（不暴露 PCL）
+    bool hasCloud(bool dense) const;
+
+    /// 本流水线持有的三角化器（供 PipelineRunner 连接 incrementalUpdate）
+    Triangulate &triangulator();
+    const Triangulate &triangulator() const;
 
     /**
      * @brief 设置用户选择的密集重建方法（由 UI 在收到请求后调用）
@@ -181,31 +176,23 @@ private:
     void log(const QString &message);
     void setProgress(const QString &stage, int percent);
 
-    /// 发射阶段性点云信号
-    void emitStageCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud,
-                        const QString &stageName);
-
-    /// 将点云保存到指定路径的 PLY 文件（统一保存入口，PLY 二进制格式）
-    void saveStageCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud,
-                        const QString &filePath,
-                        const QString &stageLabel);
-
     /// 构造项目输出目录下的完整文件路径
     QString resolveProjectFilePath(const QString &fileName) const;
 
     /// 在稀疏重建完成后等待 UI 选择密集重建方法
     void waitForDenseReconstructionMethod();
 
-    /// 执行密集重建阶段 5-6（被 execute 和 executeDenseReconstruction 共用）
+    /// 执行密集重建阶段 5-6（委托 DenseReconstructionStage）
     void runDenseStages(ReconstructionOutput &output);
 
-    /// 通过描述符插件从磁盘图像文件批量提取特征（支持线程池并行）
-    bool extractFeaturesViaPlugins(sfm::ThreadPool *threadPool);
-
     IReconstructionCallbacks *m_callbacks = nullptr;
+    sfm::ProgressSink *m_progress = nullptr;
+    /// 本实例是否已对 SfmLogger 做过一次 install（避免 setCallbacks 重复 +1）
+    bool m_sfmLoggerInstalled = false;
     ReconstructionConfig m_config;
-    ReconstructionOutput m_lastOutput;
-    bool m_stopRequested = false;
+    std::unique_ptr<ReconstructionOutput> m_lastOutput;
+    std::unique_ptr<Triangulate> m_triangulate; ///< 阶段三 DI：每流水线一份
+    sfm::CancellationToken m_cancel;
 
     // 阶段暂停同步：等待 UI 选择密集重建方法
     std::mutex m_denseMethodMutex;

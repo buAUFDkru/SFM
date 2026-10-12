@@ -2,6 +2,8 @@
 #define PATCHMATCHRECONSTRUCTOR_H
 
 #include "IDenseReconstructor.h"
+#include "algorithm/dense/PatchMatchTypes.h"
+#include "algorithm/dense/strategies.h"
 #include "data/StereoTypes.h"
 
 #include <QString>
@@ -75,26 +77,22 @@ public:
     ~PatchMatchReconstructor() override = default;
 
     QString methodName() const override { return QStringLiteral("PatchMatch"); }
-    QString displayName() const override { return QStringLiteral("PatchMatch 多视图匹配"); }
+    /// ADR-004：V1 保留作精度对照基准，标记 Deprecated 而非删除
+    QString displayName() const override
+    {
+        return QStringLiteral("PatchMatch 多视图匹配 (Deprecated)");
+    }
 
     void setConfig(const QMap<QString, QVariant> &params) override;
+    QList<ParamSchema> paramSchema() const override;
     DenseReconstructionOutput reconstruct(const DenseReconstructionInput &input) override;
 
 private:
-    /// 源视图预计算数据（避免重复加载和转换）
-    struct SourceView {
-        cv::Mat gray;       ///< 源灰度图（CV_8UC1）
-        cv::Mat K_src;      ///< 源相机内参（已按缩放调整）
-        cv::Mat R_rel;      ///< 参考相机→源相机相对旋转: R_rel = R_src * R_ref^T
-        cv::Mat T_rel;      ///< 参考相机→源相机相对平移: T_rel = t_src - R_src * R_ref^T * t_ref
-        int imageIdx = -1;  ///< 源图像在 input.imageFiles 中的索引（诊断用）
-    };
-
     /// PatchMatch 运行时上下文（避免长参数列表）
     struct Context {
         cv::Mat refGray;            ///< 参考灰度图
         cv::Mat K_ref;              ///< 参考内参（已缩放）
-        std::vector<SourceView> sources;
+        std::vector<sfm::dense::SourceView> sources;
         double depthMin = 0.0;
         double depthMax = 1.0;
         int rows = 0;
@@ -104,6 +102,9 @@ private:
     };
 
     Options m_options;
+
+    /// ADR-004 具名预设（顺序传播 + NCC + 无先验/JBU）
+    sfm::dense::PatchMatchStrategySet m_strategies = sfm::dense::presetSequential();
 
     /// 为每个参考图像构建源视图集合
     std::vector<Problem> buildProblems(const DenseReconstructionInput &input) const;
@@ -142,20 +143,6 @@ private:
                            float nx, float ny, float nz,
                            const Context &ctx) const;
 
-    /// 双线性采样灰度图（越界返回 -1 表示无效）
-    static inline float sampleGrayBilinear(const cv::Mat &gray, float x, float y);
-
-    /// 将多张源视图匹配得到的深度图融合为一张
-    cv::Mat fuseSourceDepthMaps(const cv::Mat &refImage,
-                                const std::vector<cv::Mat> &srcDepths,
-                                const std::vector<cv::Mat> &srcConfidences) const;
-
-    /// 从参考图像深度图反投影到世界坐标系，追加到点云
-    void backprojectDepth(const DenseReconstructionInput &input,
-                          int refIdx,
-                          const cv::Mat &depth,
-                          const cv::Mat &refImage,
-                          pcl::PointCloud<pcl::PointXYZRGB> &cloud) const;
 };
 
 #endif // PATCHMATCHRECONSTRUCTOR_H

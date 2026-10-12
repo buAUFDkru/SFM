@@ -3,8 +3,8 @@ TEMPLATE = app
 TARGET   = SFMReconstructor
 QT      += core gui widgets opengl openglwidgets
 
-# 启用算法链依赖（PCL 点云 / Open3D 优化 / OpenCV），见 common.pri 的 SFM3_ALG_DEPS 门控块
-SFM3_ALG_DEPS = 1
+# UI 不 include PCL/Ceres/Open3D；静态库 sfmcore 仍需链接其符号（ADR-001）
+SFM3_ALG_LINK = 1
 
 include(../../common.pri)
 

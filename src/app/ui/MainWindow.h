@@ -3,14 +3,17 @@
 
 #include <QMainWindow>
 #include <QVector>
+#include <QVector3D>
 
-#include "pipeline/ReconstructionPipeline.h"
+#include "data/SfmTypes.h"
 #include "pipeline/PipelineRunner.h"
+#include "viewmodel/RenderModel.h"
 
 class ConfigPanel;
 class LogConsole;
 class PointCloudWidget;
 class PluginRegistry;
+class ReconstructionPipeline;
 class QAction;
 class QLabel;
 class QMenu;
@@ -21,7 +24,7 @@ class QToolButton;
 /// 相机金字塔几何数据（线框 + 底面四角 + 对应图像路径）
 struct CameraFrustumGeometry
 {
-    QVector<float> lines;               ///< 线框成对端点（显示坐标系 y-up）
+    QVector<float> lines;               ///< 线框成对端点（显示坐标系）
     QVector<QVector3D> quadCorners;     ///< 每相机 4 个底面角（缩略图贴图用）
     QStringList imagePaths;             ///< 每相机对应图像路径（未注册/越界为空串）
 };
@@ -55,11 +58,10 @@ public:
     /// 以项目形态预置状态（测试自检用）：等价于"创建项目"但不弹对话框
     void setProjectForTest(const QString &dir, const QStringList &files);
 
-    /// 同步执行一次完整重建并将结果存入 lastOutput（测试自检用，阻塞直至完成）
+    /// 同步执行一次完整重建并将结果存入 lastView（测试自检用，阻塞直至完成）
     void runPipelineSyncForTest();
 
-    /// 相机位姿 → 金字塔几何（线框 + 底面四角 + 图像路径，显示坐标系 y-up；
-    /// depth 为金字塔深度，测试自检用，也供 updateCameraFrustaFromOutput 调用）
+    /// 相机位姿 → 金字塔几何（委托 FrustumBuilder；测试自检用）
     static CameraFrustumGeometry cameraFrustumGeometry(const std::vector<CameraPose> &poses,
                                                        float depth,
                                                        const QStringList &imageFiles);
@@ -68,8 +70,11 @@ public:
     static QVector<float> cameraFrustumLines(const std::vector<CameraPose> &poses,
                                              float depth);
 
-    /// 最近一次重建输出（测试自检用）
-    const ReconstructionOutput &lastOutput() const { return m_pipeline ? m_pipeline->lastOutput() : m_lastFallback; }
+    /// 最近一次重建的渲染视图（无 PCL；测试自检用）
+    sfm::view::ReconstructionView lastView() const;
+
+    /// 内部管线（测试需要 PCL 级断言时使用）
+    ReconstructionPipeline *pipeline() const { return m_pipeline; }
 
 private slots:
     void onCreateProject();
@@ -96,9 +101,7 @@ private slots:
     void onStagePointCloudReady(const QVector<float> &points,
                                 const QVector<float> &colors,
                                 const QString &stageName);
-    /// 「稀疏点云」复选框被勾选：显示稀疏点云，并联动取消「密集点云」
     void onSparseCloudVisible(bool checked);
-    /// 「密集点云」复选框被勾选：显示密集点云，并联动取消「稀疏点云」
     void onDenseCloudVisible(bool checked);
     void updateStatusLabel();
 
@@ -108,20 +111,13 @@ private:
     void setupCentralWidget();
     void connectSignals();
     void loadAndDisplayCloudFromOutput();
-    /// 显示 lastOutput 中指定类型的点云（云已在显示坐标系，无需变换）
     void displayCloudFromOutput(bool dense);
-    /// 同步「稀疏/密集点云」复选框的可用性与勾选状态（不触发显示切换）
     void syncCloudDisplayChecks(bool denseSelected);
-    /// 判断 lastOutput 中稀疏/密集点云是否存在
     bool cloudAvailable(bool dense) const;
-    /// 将当前输出的相机位姿叠加为金字塔线框（尺度取点云包围盒的 12%）
     void updateCameraFrustaFromOutput();
 
-    /// 重建运行中时提示并禁止项目操作
     bool ensureProjectOperationAllowed();
-    /// 打开项目清单并恢复 UI（失败弹窗提示，返回 false）
     bool openProject(const QString &manifestPath);
-    /// 将当前管线配置（算法/图像/项目路径）同步到 pipeline
     void applyConfigToPipeline();
     void updateTitle();
     void markDirty();
@@ -136,20 +132,18 @@ private:
     LogConsole *m_logConsole = nullptr;
     SparseReconstructionDialog *m_sparseDialog = nullptr;
     QToolButton *m_logToggle = nullptr;
-    int m_logWidth = 300;       ///< 日志面板隐藏前的宽度（恢复显示时还原）
-    bool m_showDense = false;   ///< 当前显示的点云类型（false=稀疏 true=密集）
+    int m_logWidth = 300;
+    bool m_showDense = false;
     QLabel *m_statusLabel = nullptr;
     QMenu *m_recentMenu = nullptr;
-    QAction *m_frustaAction = nullptr;  ///< 视图菜单"显示相机位姿"（与面板复选框同步）
+    QAction *m_frustaAction = nullptr;
 
     ReconstructionPipeline *m_pipeline = nullptr;
     PipelineRunner *m_pipelineRunner = nullptr;
-    ReconstructionOutput m_lastFallback;  ///< 无 pipeline 时的兜底输出
 
-    // 项目状态
-    QString m_projectDir;    ///< 项目根目录（空表示未打开项目）
-    QString m_projectName;   ///< 项目名称
-    bool m_dirty = false;    ///< 未保存修改标记（标题栏 [*]）
+    QString m_projectDir;
+    QString m_projectName;
+    bool m_dirty = false;
 };
 
 #endif // MAINWINDOW_H

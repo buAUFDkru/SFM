@@ -4,6 +4,7 @@
 #include "ThreadPool.h"
 #include "TwoViewGeometry.h"
 #include "plugin/IMatcherPlugin.h"
+#include "plugin/ParamSchemaUtils.h"
 #include "plugin/PluginRegistry.h"
 
 #include <QDebug>
@@ -93,6 +94,56 @@ MatcherService::MatcherService(PluginRegistry *registry, QObject *parent)
     : QObject(parent)
     , m_registry(registry)
 {
+}
+
+QList<ParamSchema> MatcherService::orchestrationParamSchema()
+{
+    using sfm::makeBoolParam;
+    using sfm::makeDoubleParam;
+    using sfm::makeIntParam;
+    const QString g = QStringLiteral("匹配编排");
+
+    QList<ParamSchema> out;
+    out.append(makeDoubleParam(QStringLiteral("ratioThreshold"), 0.8, 0.0, 1.0, g,
+                               QStringLiteral("Lowe 比率阈值")));
+    out.append(makeDoubleParam(QStringLiteral("ransacThreshold"), 3.0, 0.1, 50.0, g,
+                               QStringLiteral("几何验证像素阈值；缺省时按分辨率自适应")));
+    out.append(makeIntParam(QStringLiteral("minMatchCount"), 30, 1, 10000, g,
+                            QStringLiteral("建边绝对内点下限")));
+    out.append(makeDoubleParam(QStringLiteral("minMatchRatio"), 0.02, 0.0, 1.0, g,
+                               QStringLiteral("建边相对内点比率")));
+    out.append(makeIntParam(QStringLiteral("minNumInliers"), 15, 1, 10000, g,
+                            QStringLiteral("两视图几何最少内点数")));
+    out.append(makeBoolParam(QStringLiteral("guidedMatching"), true, g,
+                             QStringLiteral("极线/单应引导二次匹配")));
+    out.append(makeIntParam(QStringLiteral("guidedKnn"), 5, 2, 32, g,
+                            QStringLiteral("引导匹配 KNN")));
+    out.append(makeDoubleParam(QStringLiteral("guidedRatio"), 0.9, 0.0, 1.0, g,
+                               QStringLiteral("引导匹配比率阈值")));
+    out.append(makeIntParam(QStringLiteral("guidedBelowInliers"), 500, 0, 100000, g,
+                            QStringLiteral("仅对弱对做引导匹配的内点上限")));
+    out.append(makeBoolParam(QStringLiteral("adaptiveEdgeThreshold"), true, g,
+                             QStringLiteral("图不连通时放宽建边阈值")));
+    out.append(makeIntParam(QStringLiteral("maxRansacTrials"), 500, 100, 100000, g,
+                            QStringLiteral("RANSAC 迭代上限")));
+    out.append(makeDoubleParam(QStringLiteral("ransacConfidence"), 0.999, 0.5, 1.0, g,
+                               QStringLiteral("RANSAC 置信度")));
+
+    ParamSchema mode;
+    mode.name = QStringLiteral("matchingMode");
+    mode.type = ParamSchema::Type::Enum;
+    mode.defaultValue = QStringLiteral("auto");
+    mode.enumValues = {QStringLiteral("auto"), QStringLiteral("sequential"),
+                       QStringLiteral("exhaustive")};
+    mode.group = g;
+    mode.tooltip = QStringLiteral("候选对生成模式");
+    out.append(mode);
+
+    out.append(makeIntParam(QStringLiteral("sequenceWindow"), 10, 1, 200, g,
+                            QStringLiteral("序列窗口大小")));
+    out.append(makeIntParam(QStringLiteral("exhaustiveMaxImages"), 20, 2, 500, g,
+                            QStringLiteral("auto 模式下走穷举的最大图像数")));
+    return out;
 }
 
 std::unique_ptr<IMatcherWorker> MatcherService::createMatcherWorker(

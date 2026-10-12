@@ -23,6 +23,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
@@ -32,7 +33,12 @@
 #include "plugin/PluginRegistry.h"
 #include "builtin/registerBuiltIn.h"
 #include "data/SfmTypes.h"
+#include "data/ReconstructionOutput.h"
+#include "algorithm/ProgressSink.h"
+#include "pipeline/DenseReconstructionFactory.h"
 #include "pipeline/ReconstructionPipeline.h"
+#include "pipeline/ReconstructionConfigIO.h"
+#include "pipeline/ProjectRepository.h"
 #include "pipeline/ProjectStore.h"
 #include "ParamWidget/ParamFormGenerator.h"
 #include "ParamWidget/AlgorithmComboPanel.h"
@@ -728,6 +734,127 @@ private slots:
         // 滚动改造后参数收集仍正常
         const QMap<QString, QVariant> params = dlg.selectedParams();
         CHECK_UI(params.contains(QStringLiteral("numIterations")), "PatchMatch 参数已收集");
+
+        // ADR-002：对话框表单来自方法 paramSchema（经工厂），而非 UI 侧硬编码
+        DenseReconstructionFactory::instance().registerBuiltinMethods();
+        const QList<ParamSchema> schema =
+            DenseReconstructionFactory::instance().paramSchemaFor(QStringLiteral("PatchMatch"));
+        CHECK_UI(!schema.isEmpty(), "工厂可查询 PatchMatch schema");
+        QSet<QString> schemaKeys;
+        for (const auto &s : schema)
+            schemaKeys.insert(s.name);
+        for (auto it = params.constBegin(); it != params.constEnd(); ++it)
+            CHECK_UI(schemaKeys.contains(it.key()),
+                     QStringLiteral("表单键 %1 来自方法 schema").arg(it.key()));
+    }
+};
+
+/// ADR-003：ProgressSink 优先于 IReconstructionCallbacks 进度/日志
+class TestProgressSink : public QObject
+{
+    Q_OBJECT
+private slots:
+    void pipelineRoutesToProgressSink()
+    {
+        struct CaptureSink : sfm::ProgressSink {
+            QStringList logs;
+            QString lastStage;
+            int lastPct = -1;
+            void onStage(const QString &stage, int percent) override
+            {
+                lastStage = stage;
+                lastPct = percent;
+            }
+            void onLog(const QString &message) override { logs.append(message); }
+        };
+
+        class UnusedCallbacks : public IReconstructionCallbacks {
+        public:
+            bool hit = false;
+            void onProgress(const QString &, int) override { hit = true; }
+            void onLog(const QString &) override { hit = true; }
+            void onStagePointCloudReady(const QVector<float> &, const QVector<float> &,
+                                        const QString &) override
+            {
+            }
+            void onDenseReconstructionMethodRequested() override {}
+        };
+
+        ReconstructionPipeline pipeline;
+        CaptureSink sink;
+        UnusedCallbacks cb;
+        pipeline.setCallbacks(&cb);
+        pipeline.setProgressSink(&sink);
+        CHECK_UI(pipeline.progressSink() == &sink, "ProgressSink 已注入");
+
+        // 空图像 execute → log("错误: 未加载图像")，应走 ProgressSink 而非 callbacks
+        pipeline.execute();
+        CHECK_UI(!sink.logs.isEmpty(), "ProgressSink 收到日志");
+        CHECK_UI(!cb.hit, "有 ProgressSink 时不回退到 callbacks 进度/日志");
+
+        pipeline.setProgressSink(nullptr);
+        pipeline.setCallbacks(nullptr);
+    }
+};
+
+/// ADR-002：ReconstructionConfig 预设 JSON 外置
+class TestReconstructionPresets : public QObject
+{
+    Q_OBJECT
+private slots:
+    void builtinDefaultHasTunedMatcherParams()
+    {
+        ReconstructionConfig cfg = sfm::makeDefaultReconstructionConfig();
+        CHECK_UI(cfg.descriptorType == QStringLiteral("SIFT"), "default 预设 descriptor=SIFT");
+        CHECK_UI(cfg.matcherType == QStringLiteral("FLANN"), "default 预设 matcher=FLANN");
+        CHECK_UI(cfg.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 8192,
+                 "default 预设 maxFeatures=8192");
+        CHECK_UI(cfg.matcherParams.value(QStringLiteral("minMatchCount")).toInt() == 30,
+                 "default 预设 minMatchCount=30");
+        CHECK_UI(cfg.matcherParams.value(QStringLiteral("guidedMatching")).toBool(),
+                 "default 预设 guidedMatching=true");
+        CHECK_UI(!cfg.matcherParams.contains(QStringLiteral("ransacThreshold")),
+                 "default 预设不写 ransacThreshold（分辨率自适应）");
+    }
+
+    void wideBaselineRelaxesThresholds()
+    {
+        ReconstructionConfig cfg;
+        QString err;
+        const bool ok = sfm::loadBuiltinReconstructionPreset(
+            cfg, QStringLiteral("wide-baseline"), &err);
+        if (!ok)
+            std::fprintf(stderr, "[ui] wide-baseline err: %s\n", qPrintable(err));
+        CHECK_UI(ok, "加载 wide-baseline");
+        CHECK_UI(cfg.matcherParams.value(QStringLiteral("minMatchCount")).toInt() == 20,
+                 "wide-baseline minMatchCount=20");
+        CHECK_UI(cfg.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 12288,
+                 "wide-baseline maxFeatures=12288");
+    }
+
+    void applyDoesNotClobberImageFiles()
+    {
+        ReconstructionConfig cfg;
+        cfg.imageFiles = {QStringLiteral("a.jpg"), QStringLiteral("b.jpg")};
+        cfg.projectPath = QStringLiteral("D:/proj");
+        QString err;
+        const bool ok =
+            sfm::loadBuiltinReconstructionPreset(cfg, QStringLiteral("outdoor"), &err);
+        if (!ok)
+            std::fprintf(stderr, "[ui] outdoor err: %s\n", qPrintable(err));
+        CHECK_UI(ok, "加载 outdoor");
+        CHECK_UI(cfg.imageFiles.size() == 2, "预设不覆盖 imageFiles");
+        CHECK_UI(cfg.projectPath == QStringLiteral("D:/proj"), "预设不覆盖 projectPath");
+        CHECK_UI(cfg.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 8192,
+                 "outdoor 注入 descriptorParams");
+    }
+
+    void pipelineCtorAppliesDefaultPreset()
+    {
+        ReconstructionPipeline pipeline;
+        const ReconstructionConfig cfg = pipeline.config();
+        CHECK_UI(cfg.matcherParams.value(QStringLiteral("minNumInliers")).toInt() == 15,
+                 "Pipeline 构造后已注入 default 预设");
     }
 };
 
@@ -779,6 +906,86 @@ private slots:
         CHECK_UI(r.denseCloudPath == QStringLiteral("clouds/dense.ply"), "清单密集点云路径");
         CHECK_UI(r.totalPoints == 1234 && qAbs(r.reprojectionError - 0.56) < 1e-9,
                  "清单统计信息");
+        CHECK_UI(r.formatVersion == 2, "清单 formatVersion=2");
+        CHECK_UI(r.coordinateFrame == QStringLiteral("opencv"),
+                 "清单 coordinateFrame=opencv");
+    }
+
+    void cloudFrameFromManifest()
+    {
+        ProjectManifest v1;
+        v1.formatVersion = 1;
+        CHECK_UI(sfm::ProjectRepository::frameFromManifest(v1) ==
+                     sfm::CloudFileFrame::Display,
+                 "v1 默认 display");
+        ProjectManifest v2;
+        v2.formatVersion = 2;
+        v2.coordinateFrame = QStringLiteral("opencv");
+        CHECK_UI(sfm::ProjectRepository::frameFromManifest(v2) ==
+                     sfm::CloudFileFrame::OpenCv,
+                 "v2 opencv");
+        v2.coordinateFrame = QStringLiteral("display");
+        CHECK_UI(sfm::ProjectRepository::frameFromManifest(v2) ==
+                     sfm::CloudFileFrame::Display,
+                 "显式 display 覆盖");
+    }
+
+    void schemaMigratesV1AndFillsDefaults()
+    {
+        registerBuiltInAlgorithms(PluginRegistry::instance());
+
+        QTemporaryDir dir;
+        CHECK_UI(dir.isValid(), "临时目录");
+        // 手写 v1 清单：无 coordinateFrame、descriptor 缺 maxFeatures
+        const QString path =
+            QDir(dir.path()).filePath(QStringLiteral("Legacy.sfmproj"));
+        {
+            QFile f(path);
+            CHECK_UI(f.open(QIODevice::WriteOnly | QIODevice::Text), "写 v1 清单");
+            f.write(R"({
+  "formatVersion": 1,
+  "name": "Legacy",
+  "images": ["a.jpg"],
+  "descriptor": { "type": "SIFT", "params": { "nOctaveLayers": 3 } },
+  "matcher": { "type": "FLANN", "params": { "ratioThreshold": 0.8 } },
+  "results": {}
+})");
+        }
+
+        ProjectManifest m;
+        QString err;
+        CHECK_UI(ProjectStore::readManifest(dir.path(), QStringLiteral("Legacy"), &m, &err),
+                 "读 v1 清单");
+        CHECK_UI(m.formatVersion == 1, "读时不改写 formatVersion");
+        CHECK_UI(m.coordinateFrame == QStringLiteral("display"),
+                 "v1 空 coordinateFrame → display");
+
+        QString warn;
+        ProjectStore::normalizeManifestAlgorithms(m, &PluginRegistry::instance(), &warn);
+        CHECK_UI(m.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 8192,
+                 "缺键 maxFeatures 由 schema 补齐");
+        CHECK_UI(m.matcherParams.value(QStringLiteral("minMatchCount")).toInt() == 30,
+                 "编排键 minMatchCount 由 schema 补齐");
+    }
+
+    void schemaSanitizesOutOfRange()
+    {
+        registerBuiltInAlgorithms(PluginRegistry::instance());
+        ProjectManifest m;
+        m.formatVersion = 2;
+        m.descriptorType = QStringLiteral("SIFT");
+        m.descriptorParams = QJsonObject{{QStringLiteral("maxFeatures"), -1}};
+        m.matcherType = QStringLiteral("FLANN");
+        m.matcherParams = QJsonObject{{QStringLiteral("ratioThreshold"), 2.5}};
+
+        QString warn;
+        ProjectStore::normalizeManifestAlgorithms(m, &PluginRegistry::instance(), &warn);
+        CHECK_UI(m.descriptorParams.value(QStringLiteral("maxFeatures")).toInt() == 8192,
+                 "越界 maxFeatures 纠正为默认");
+        CHECK_UI(qAbs(m.matcherParams.value(QStringLiteral("ratioThreshold")).toDouble() - 0.8) <
+                     1e-9,
+                 "越界 ratioThreshold 纠正为默认");
+        CHECK_UI(!warn.isEmpty(), "纠正说明写入 warn");
     }
 
     void cameraPosesRoundtrip()
@@ -908,8 +1115,7 @@ private slots:
             return;
         }
 
-        // 回归：阶段保存的 dense.ply 必须是显示坐标系（与 lastOutput 一致），
-        // 否则打开项目读回的密集点云方向差 180°
+        // 回归：阶段保存的 dense.ply 为算法坐标系（= toAlgorithm(lastOutput 显示系)）
         const ReconstructionOutput &execOut = pipe.lastOutput();
         if (execOut.denseCloud && !execOut.denseCloud->empty()) {
             pcl::PointCloud<pcl::PointXYZRGB> stageDense;
@@ -919,16 +1125,19 @@ private slots:
                                stageDense.size() == execOut.denseCloud->size();
             if (coordsMatch) {
                 const size_t sampleStep =
-                    std::max<size_t>(1, execOut.denseCloud->size() / 20);
+                    (std::max)(size_t{1}, execOut.denseCloud->size() / 20);
                 for (size_t i = 0; i < execOut.denseCloud->size(); i += sampleStep) {
-                    if (std::abs(stageDense.points[i].y - execOut.denseCloud->points[i].y) > 1e-3f ||
-                        std::abs(stageDense.points[i].z - execOut.denseCloud->points[i].z) > 1e-3f) {
+                    const auto &disp = execOut.denseCloud->points[i];
+                    // 显示系 → 算法系：x/z 取反
+                    if (std::abs(stageDense.points[i].x - (-disp.x)) > 1e-3f ||
+                        std::abs(stageDense.points[i].y - disp.y) > 1e-3f ||
+                        std::abs(stageDense.points[i].z - (-disp.z)) > 1e-3f) {
                         coordsMatch = false;
                         break;
                     }
                 }
             }
-            CHECK_UI(coordsMatch, "阶段保存 dense.ply 为显示坐标系（无二次翻转）");
+            CHECK_UI(coordsMatch, "阶段保存 dense.ply 为算法坐标系");
         }
 
         QString err;
@@ -1008,7 +1217,7 @@ private slots:
             CHECK_UI(false, "UI 管线抛出未知异常");
         }
 
-        const ReconstructionOutput &out = w.lastOutput();
+        const ReconstructionOutput &out = w.pipeline()->lastOutput();
         CHECK_UI(out.sparseCloud && out.sparseCloud->size() >= 50,
                  "UI 路径稀疏点云 ≥50");
         CHECK_UI(w.currentImageCount() == 6, "图像数 6");
@@ -1052,6 +1261,8 @@ int main(int argc, char *argv[])
     status |= QTest::qExec(new TestAlgorithmComboPanel, argc, argv);
     status |= QTest::qExec(new TestBasicWidgets, argc, argv);
     status |= QTest::qExec(new TestDenseReconstructionDialog, argc, argv);
+    status |= QTest::qExec(new TestProgressSink, argc, argv);
+    status |= QTest::qExec(new TestReconstructionPresets, argc, argv);
     status |= QTest::qExec(new TestDarkTheme, argc, argv);
     status |= QTest::qExec(new TestConfigPanelStates, argc, argv);
     status |= QTest::qExec(new TestProjectStore, argc, argv);

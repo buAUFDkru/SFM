@@ -1,5 +1,5 @@
 #include "DenseReconstructionFactory.h"
-
+#include "IDenseReconstructor.h"
 #include "PatchMatchReconstructor.h"
 #include "PatchMatchReconstructorV2.h"
 
@@ -46,6 +46,26 @@ QStringList DenseReconstructionFactory::availableDisplayNames() const
     return names;
 }
 
+QList<ParamSchema> DenseReconstructionFactory::paramSchemaFor(const QString &name) const
+{
+    auto inst = create(name);
+    return inst ? inst->paramSchema() : QList<ParamSchema>{};
+}
+
+bool DenseReconstructionFactory::validateParamsFor(
+    const QString &name,
+    const QMap<QString, QVariant> &params,
+    QString *errorMsg) const
+{
+    auto inst = create(name);
+    if (!inst) {
+        if (errorMsg)
+            *errorMsg = QStringLiteral("未知密集重建方法: %1").arg(name);
+        return false;
+    }
+    return inst->validateParams(params, errorMsg);
+}
+
 void DenseReconstructionFactory::registerBuiltinMethods()
 {
     // 幂等注册（静态库链接时，实现 TU 中的静态注册对象可能不被拉入，
@@ -53,7 +73,8 @@ void DenseReconstructionFactory::registerBuiltinMethods()
     if (m_creators.contains("PatchMatch")) {
         return;
     }
-    registerMethod("PatchMatch", "PatchMatch 多视图匹配",
+    // ADR-004 / F15a：V1 为 Deprecated 对照预设；V2 为推荐预设（策略内核抽取进行中）
+    registerMethod("PatchMatch", "PatchMatch 多视图匹配 (Deprecated)",
                    []() -> IDenseReconstructorPtr {
                        return std::make_unique<PatchMatchReconstructor>();
                    });

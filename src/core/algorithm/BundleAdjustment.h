@@ -57,24 +57,23 @@ struct BAIntrinsicsOptions
 };
 
 /**
- * @brief 光束法平差类（单例模式）
+ * @brief 光束法平差类（无跨调用状态，可按流水线实例持有）
  *
  * 负责SFM重建中的光束法平差优化，包含两种优化模式：
  * 1. bundleAdjustment：局部BA，每加入一张新图像后执行，仅优化新相机位姿和三维点
  * 2. globalBundleAdjustment：全局BA + 自标定精化，优化所有内参、外参和三维点
  *
  * 两种方法均使用Ceres Solver中的Huber鲁棒核函数抑制外点影响。
+ *
+ * ADR-003：公开构造，由编排层注入；禁止进程级可变单例。
  */
 class BundleAdjustment : public QObject
 {
     Q_OBJECT
 
 public:
-    /**
-     * @brief 获取单例实例
-     * @return BundleAdjustment实例指针
-     */
-    static BundleAdjustment *instance();
+    explicit BundleAdjustment(QObject *parent = nullptr);
+    ~BundleAdjustment() override = default;
 
     /**
      * @brief 局部光束法平差 —— 每注册一张新图像后执行（COLMAP AdjustLocalBundle）
@@ -156,12 +155,8 @@ public:
         BAIntrinsicsOptions *intr = nullptr);
 
 private:
-    explicit BundleAdjustment(QObject *parent = nullptr);
-    ~BundleAdjustment() override = default;
     BundleAdjustment(const BundleAdjustment &) = delete;
     BundleAdjustment &operator=(const BundleAdjustment &) = delete;
-
-    static BundleAdjustment *s_instance;
 };
 
 #endif // BUNDLEADJUSTMENT_H

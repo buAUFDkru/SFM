@@ -1,31 +1,22 @@
 #include "PointCloudBuilder.h"
 
+#include <QDebug>
+#include <QString>
+
+#include <algorithm>
+#include <cmath>
+
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include <pcl/search/kdtree.h>
 #include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/surface/mls.h>
 
 #include <open3d/Open3D.h>
 
-PointCloudBuilder *PointCloudBuilder::s_instance = nullptr;
+namespace sfm {
+namespace pointcloud {
 
-PointCloudBuilder *PointCloudBuilder::instance()
-{
-    if (!s_instance) {
-        s_instance = new PointCloudBuilder();
-    }
-    return s_instance;
-}
-
-PointCloudBuilder::PointCloudBuilder(QObject *parent)
-    : QObject(parent)
-{
-}
-
-void PointCloudBuilder::create3DPoints(const std::vector<cv::Mat> &eplimgls,
+void create3DPoints(const std::vector<cv::Mat> &eplimgls,
                                        const std::vector<cv::Mat> &disparityMaps,
                                        const std::vector<CameraPose> &cameraPoses,
                                        const std::vector<cv::Mat> &Qs,
@@ -133,8 +124,8 @@ void PointCloudBuilder::create3DPoints(const std::vector<cv::Mat> &eplimgls,
     }
 }
 
-bool PointCloudBuilder::convertToPCL(const std::vector<Point3D> &points,
-                                     pcl::PointCloud<pcl::PointXYZRGB>::Ptr &outCloud)
+bool convertToPCL(const std::vector<Point3D> &points,
+                  pcl::PointCloud<pcl::PointXYZRGB>::Ptr &outCloud)
 {
     if (!outCloud) {
         outCloud.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
@@ -156,7 +147,7 @@ bool PointCloudBuilder::convertToPCL(const std::vector<Point3D> &points,
     return !outCloud->empty();
 }
 
-void PointCloudBuilder::optimizeProcessDense(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud)
+void optimizeProcessDense(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud)
 {
     qDebug().noquote()
     << QString("[点云优化] 开始 (Open3D), 输入点数=%1").arg(cloud->size());
@@ -231,9 +222,8 @@ void PointCloudBuilder::optimizeProcessDense(pcl::PointCloud<pcl::PointXYZRGB>::
     }
 }
 
-void PointCloudBuilder::optimizeProcess(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud)
+void optimizeProcess(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud)
 {
-
     qDebug().noquote()
         << QString("[点云优化] 开始, 输入点数=%1").arg(cloud->size());
 
@@ -253,3 +243,6 @@ void PointCloudBuilder::optimizeProcess(pcl::PointCloud<pcl::PointXYZRGB>::Ptr &
     qDebug().noquote()
         << QString("[点云优化] 完成, 输出点数=%1").arg(cloud->size());
 }
+
+} // namespace pointcloud
+} // namespace sfm

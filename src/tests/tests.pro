@@ -6,4 +6,5 @@ SUBDIRS = \
     patchmatch_test \
     sparse_test \
     ui_test \
-    recon_cli
+    recon_cli \
+    bench_compare

@@ -10,23 +10,29 @@
 
 #include "data/SfmTypes.h"
 
+class PluginRegistry;
+
 /**
  * @brief 项目清单（.sfmproj）—— 描述一个重建项目的全部元数据
  *
  * 项目采用目录式结构，清单文件位于项目根目录：
  *   MyProject/
  *   ├── MyProject.sfmproj      ← 本清单（JSON）
- *   ├── clouds/sparse.ply      ← 稀疏点云（显示坐标系 y-up）
+ *   ├── clouds/sparse.ply      ← 稀疏点云（v2=算法坐标系；v1=显示系）
  *   ├── clouds/dense.ply       ← 密集点云（存在时）
- *   ├── cameras/poses.json     ← 相机内外参（JSON，人类可读）
+ *   ├── cameras/poses.json     ← 相机内外参（JSON，算法坐标系）
  *   └── matches/pairs.bin      ← 稀疏匹配对（紧凑二进制，密集续算输入）
  *
  * 图像文件引用原路径（不复制进项目）；移动或删除源图像后项目
  * 无法重新执行完整重建，但点云查看与密集续算不受影响。
+ *
+ * formatVersion：1=PLY 为显示系；2=PLY 为算法系（与 poses 一致，ADR-005）。
  */
 struct ProjectManifest
 {
-    int formatVersion = 1;
+    int formatVersion = 2;
+    /// "opencv"（算法系）或 "display"（v1 遗留）；空则按 formatVersion 推断
+    QString coordinateFrame;
     QString name;                       ///< 项目名称
     QDateTime createdAt;
     QDateTime modifiedAt;
@@ -62,6 +68,18 @@ struct ProjectManifest
  */
 namespace ProjectStore
 {
+/// 读时坐标系迁移：coordinateFrame 为空时 v1→display、v≥2→opencv（不改 formatVersion）
+void migrateManifestCoordinateFrame(ProjectManifest &m);
+
+/**
+ * @brief schema 驱动：补缺键 + 软纠正非法值（ADR-002）
+ *
+ * registry 为空时仅做坐标系迁移。descriptor/matcher 插件缺失时跳过对应侧，不失败。
+ * warn 收集纠正说明（可选）。
+ */
+void normalizeManifestAlgorithms(ProjectManifest &m, const PluginRegistry *registry,
+                                 QString *warn = nullptr);
+
 /// 写清单到 <projectDir>/<name>.sfmproj（自动创建项目子目录结构）
 bool writeManifest(const QString &projectDir, const ProjectManifest &m,
                    QString *error = nullptr);

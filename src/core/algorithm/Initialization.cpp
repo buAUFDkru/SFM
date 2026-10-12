@@ -10,6 +10,7 @@
  */
 
 #include "Initialization.h"
+#include "SfmGeometry.h"
 #include "TwoViewGeometry.h"
 
 #include <QDebug>
@@ -19,18 +20,8 @@
 #include <opencv2/calib3d.hpp>
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  单例实现
+//  构造 / 过渡期共享实例
 // ═════════════════════════════════════════════════════════════════════════════
-
-Initialization *Initialization::s_instance = nullptr;
-
-Initialization *Initialization::instance()
-{
-    if (!s_instance) {
-        s_instance = new Initialization();
-    }
-    return s_instance;
-}
 
 Initialization::Initialization(QObject *parent)
     : QObject(parent)
@@ -499,64 +490,46 @@ std::vector<InitResult> Initialization::findInitialPairCandidates(
         double baseline = cv::norm(t);
 
         // ── 三角化所有内点，计算三角化角度 ──
+        // 角度必须在世界系下用「光心→三维点」射线夹角（SfmGeom），
+        // 旧实现把 cam1/cam2 归一化坐标直接点积，宽基线时会系统性偏低。
         std::vector<double> angles;
         angles.reserve(pts1.size());
 
-        // 相机1投影矩阵 [I|0]
+        // 相机1投影矩阵 [I|0]；相机2 [R|t]；光心 C1=0, C2=-Rᵀt
         cv::Mat T1 = (cv::Mat_<double>(3, 4) <<
             1, 0, 0, 0,
             0, 1, 0, 0,
             0, 0, 1, 0);
-
-        // 相机2投影矩阵 [R|t]
         cv::Mat T2 = (cv::Mat_<double>(3, 4) <<
             R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0, 0),
             R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1, 0),
             R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2, 0));
+        const cv::Vec3d C1(0.0, 0.0, 0.0);
+        const cv::Vec3d C2 = SfmGeom::cameraCenter(R, t);
 
         for (size_t k = 0; k < pts1.size(); ++k) {
-            // 像素坐标转归一化相机坐标
-            cv::Point2d n1 = pixel2cam(pts1[k], K);
-            cv::Point2d n2 = pixel2cam(pts2[k], K);
+            const cv::Point2d n1 = pixel2cam(pts1[k], K);
+            const cv::Point2d n2 = pixel2cam(pts2[k], K);
 
-            // 线性三角化
             cv::Mat ptsMat1 = (cv::Mat_<double>(2, 1) << n1.x, n1.y);
             cv::Mat ptsMat2 = (cv::Mat_<double>(2, 1) << n2.x, n2.y);
             cv::Mat pts4D;
             cv::triangulatePoints(T1, T2, ptsMat1, ptsMat2, pts4D);
 
-            // 齐次坐标归一化
-            double w = pts4D.at<double>(3, 0);
+            const double w = pts4D.at<double>(3, 0);
             if (std::abs(w) < 1e-10) continue;
 
-            double x = pts4D.at<double>(0, 0) / w;
-            double y = pts4D.at<double>(1, 0) / w;
-            double z = pts4D.at<double>(2, 0) / w;
-
-            // 三维点必须在相机1前方
+            const double x = pts4D.at<double>(0, 0) / w;
+            const double y = pts4D.at<double>(1, 0) / w;
+            const double z = pts4D.at<double>(2, 0) / w;
             if (z <= 0) continue;
 
-            // 计算该点在相机2坐标系下的坐标
-            cv::Mat ptCam2 = R * (cv::Mat_<double>(3, 1) << x, y, z) + t;
-
-            // 三维点也必须在相机2前方
+            const cv::Mat ptCam2 = R * (cv::Mat_<double>(3, 1) << x, y, z) + t;
             if (ptCam2.at<double>(2, 0) <= 0) continue;
 
-            // ── 计算三角化角度 ──
-            // 相机1射线方向（从光心到三维点）：归一化坐标(n1.x, n1.y, 1)
-            double ray1_len = std::sqrt(n1.x * n1.x + n1.y * n1.y + 1.0);
-            // 相机2射线方向：归一化后的ptCam2
-            double ray2_x = ptCam2.at<double>(0, 0) / ptCam2.at<double>(2, 0);
-            double ray2_y = ptCam2.at<double>(1, 0) / ptCam2.at<double>(2, 0);
-            double ray2_len = std::sqrt(ray2_x * ray2_x + ray2_y * ray2_y + 1.0);
-
-            // 两射线的夹角余弦
-            double cos_angle = (n1.x * ray2_x + n1.y * ray2_y + 1.0) / (ray1_len * ray2_len);
-            cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
-
-            double angle_rad = std::acos(cos_angle);
-            double angle_deg = angle_rad * 180.0 / std::acos(-1.0);
-            angles.push_back(angle_deg);
+            const double angle_deg = SfmGeom::triangulationAngleDeg(
+                cv::Vec3d(x, y, z), C1, C2);
+            if (angle_deg > 1e-6) angles.push_back(angle_deg);
         }
 
         if (angles.empty()) continue;
@@ -564,36 +537,42 @@ std::vector<InitResult> Initialization::findInitialPairCandidates(
         // 取中位角度（比均值更鲁棒）
         double medAngle = median(angles);
 
-        // ── 角度权重函数 ──
-        // 峰值在7°-10°，0°和>20°时权重衰减
-        // 增长段 3°→0、7°→1：原 1°→0、5°→1 时 3~4° 的弱角度对仍有 ~0.5
-        // 权重，乘上大内点数常登顶（data #27 系，实测种子角中位 2.9° →
-        // 重建三角化角中位 4.2°、点数腰斩）。右移后 3.9° 权重只剩 0.22，
-        // 与 #11 系（12.7~13.6°，权重 ~0.87）拉开 4 倍差距。
-        double angleWeight = 0.0;
-        if (medAngle >= 3.0 && medAngle < 7.0) {
-            // 线性增长：3°→0, 7°→1
-            angleWeight = (medAngle - 3.0) / 4.0;
-        } else if (medAngle >= 7.0 && medAngle <= 10.0) {
-            // 最优区间：权重=1
-            angleWeight = 1.0;
-        } else if (medAngle > 10.0 && medAngle <= 20.0) {
-            // 缓衰减：10°→1, 20°→0.5（原实现衰减到 0，对大视角数据集过于严苛）
-            angleWeight = 1.0 - 0.5 * (medAngle - 10.0) / 10.0;
-        } else if (medAngle > 20.0) {
-            // 大视角数据集的中位三角化角常常远超 20°。原实现此处直接归零，
-            // 会导致所有候选对得分同为 0，种子对退化成"循环里碰到的第一个"。
-            // 改为缓慢衰减，保证宽基线对之间仍有区分度：
-            //   20°→0.5, 40°→0.25, 60°→0.167, 90°→0.125
-            angleWeight = 0.5 / (1.0 + (medAngle - 20.0) / 20.0);
+        // COLMAP EstimateInitialTwoViewGeometry：拒绝 |t_z|/‖t‖ ≥ init_max_forward_motion
+        // （默认 0.95）。纯前进运动的相对位姿对后续增量极不稳定。
+        if (baseline > 1e-9) {
+            const double forwardRatio =
+                std::abs(t.at<double>(2, 0)) / baseline;
+            if (forwardRatio >= 0.95) continue;
         }
-        // <1°：angleWeight = 0.0（纯旋转 / 基线过短，确实退化）
+
+        // ── 角度权重函数（对齐 COLMAP init_min_tri_angle = 16°）──
+        //
+        // 旧峰值在 7°–10°：无人机序列相邻帧内点极多但视差只有 ~6°，会压过
+        // 宽基线对（COLMAP 会硬性拒绝 ≤16° 的种子对）。新权重：
+        //   <5°     → 0（退化）
+        //   5°–12°  → 弱权重（仅作无更优候选时的兜底）
+        //   12°–16° → 爬升到 1
+        //   16°–30° → 1（优先区间，对应 COLMAP 门槛附近）
+        //   30°–60° → 缓降到 0.5
+        //   >60°    → 继续缓降，保留大视角场景区分度
+        double angleWeight = 0.0;
+        if (medAngle >= 5.0 && medAngle < 12.0) {
+            angleWeight = 0.15 * (medAngle - 5.0) / 7.0;
+        } else if (medAngle >= 12.0 && medAngle < 16.0) {
+            angleWeight = 0.15 + 0.85 * (medAngle - 12.0) / 4.0;
+        } else if (medAngle >= 16.0 && medAngle <= 30.0) {
+            angleWeight = 1.0;
+        } else if (medAngle > 30.0 && medAngle <= 60.0) {
+            angleWeight = 1.0 - 0.5 * (medAngle - 30.0) / 30.0;
+        } else if (medAngle > 60.0) {
+            angleWeight = 0.5 / (1.0 + (medAngle - 60.0) / 30.0);
+        }
 
         // ── 综合评分 ──
         int validInliers = static_cast<int>(angles.size());
         double pairScore = validInliers * angleWeight;
 
-        // F模型加分（非平面场景更适合初始化，避免退化）
+        // F/E 模型加分（非平面场景更适合初始化，避免退化）
         if (modelChoice == 0) {
             pairScore *= 1.2;
         }
@@ -634,11 +613,34 @@ std::vector<InitResult> Initialization::findInitialPairCandidates(
 
     // 按评分降序；评分相同时按内点数降序
     // （大视角数据集常见多个候选评分并列，此时内点数是更可靠的区分依据）
-    std::sort(scored.begin(), scored.end(),
-              [](const InitResult &a, const InitResult &b) {
-                  if (a.score != b.score) return a.score > b.score;
-                  return a.points1.size() > b.points1.size();
-              });
+    auto byScore = [](const InitResult &a, const InitResult &b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.points1.size() > b.points1.size();
+    };
+    std::sort(scored.begin(), scored.end(), byScore);
+
+    // COLMAP 风格：只要存在中位角 ≥ 12° 的候选，就不再让 ~6° 相邻帧登顶。
+    // （COLMAP 对种子对硬性要求 init_min_tri_angle=16°；12° 作为软门槛，
+    //  在无人机序列上仍能筛掉高内点/低视差对，同时比 16° 略宽松以便兜底。）
+    constexpr double kPreferredMinAngleDeg = 12.0;
+    std::vector<InitResult> preferred;
+    preferred.reserve(scored.size());
+    for (const InitResult &c : scored) {
+        if (c.medianAngle >= kPreferredMinAngleDeg) preferred.push_back(c);
+    }
+    if (!preferred.empty()) {
+        qDebug().noquote()
+            << QString("[初始化] 优先宽基线候选: %1/%2 对中位角≥%3°")
+                   .arg(preferred.size())
+                   .arg(scored.size())
+                   .arg(kPreferredMinAngleDeg, 0, 'f', 0);
+        scored.swap(preferred);
+    } else if (!scored.empty()) {
+        qDebug().noquote()
+            << QString("[初始化] 无中位角≥%1° 的候选，回退到弱视差对（共 %2）")
+                   .arg(kPreferredMinAngleDeg, 0, 'f', 0)
+                   .arg(scored.size());
+    }
 
     if (topK > 0 && static_cast<int>(scored.size()) > topK) {
         scored.resize(static_cast<size_t>(topK));

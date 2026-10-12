@@ -17,6 +17,7 @@
 #include <opencv2/calib3d.hpp>
 
 #include "data/SfmTypes.h"
+#include "BundleAdjustment.h"
 #include "Initialization.h"
 #include "CorrespondenceGraph.h"
 #include "ObservationManager.h"
@@ -177,11 +178,8 @@ class Triangulate : public QObject
     Q_OBJECT
 
 public:
-    /**
-     * @brief 获取三角测量单例实例
-     * @return Triangulate实例指针
-     */
-    static Triangulate *instance();
+    explicit Triangulate(QObject *parent = nullptr);
+    ~Triangulate() override = default;
 
     /// 设置稀疏重建可调参数
     void setOptions(const TriangulateOptions &options) { m_options = options; }
@@ -250,25 +248,7 @@ public:
 private:
     int m_lastEmittedPointCount = 0;  ///< 上次emit时已发送的点数，用于增量推送
 
-private:
-    /**
-     * @brief 私有构造函数（单例模式）
-     */
-    explicit Triangulate(QObject *parent = nullptr);
-
-    /**
-     * @brief 析构函数（默认）
-     */
-    ~Triangulate() override = default;
-
-    /**
-     * @brief 禁用拷贝构造函数（单例不可拷贝）
-     */
     Triangulate(const Triangulate &) = delete;
-
-    /**
-     * @brief 禁用拷贝赋值运算符（单例不可拷贝）
-     */
     Triangulate &operator=(const Triangulate &) = delete;
 
     /**
@@ -436,16 +416,15 @@ private:
     double computeImageFeatureDistributionScore(int imageId,
                                                 const std::vector<FeatureResult> &features) const;
 
-    /**
-     * @brief 单例实例指针
-     */
-    static Triangulate *s_instance;
-
     /// 稀疏重建可调参数（阈值集中于此，便于按数据集调优）
     TriangulateOptions m_options;
 
     /// 增量三角化器参数
     TriangulatorOptions m_triOptions;
+
+    /// 本实例私有的 BA（ADR-003 DI）
+    /// unique_ptr：避免 QObject 值成员嵌套限制
+    std::unique_ptr<BundleAdjustment> m_ba;
 
     // ── 阶段二运行时状态（仅在 triangulate() 执行期间有效）──────────────
     const std::vector<MatchPair> *m_matchPairs = nullptr;

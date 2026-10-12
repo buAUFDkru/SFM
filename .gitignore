@@ -1,9 +1,16 @@
 # 构建产物
-build/
+/build/
 
 # Qt Creator
 *.user
-.qtcreator/
+/.qtcreator/
+
+# 不上传到 GitHub（仅仓库根目录；SFM3-PluginSDK 内同名子树仍跟踪）
+/baselines/
+/delivery/
+/docs/
+/templates/
+/tools/
 
 # 编译生成物与临时文件
 *.obj
@@ -20,6 +27,9 @@ Makefile.*
 .qmake.stash
 .qmake.cache
 
+# Plugin SDK 需要分发的静态库
+!/SFM3-PluginSDK/lib/*.lib
+
 # 调试残留
 .dbg/
 
@@ -27,8 +37,7 @@ Makefile.*
 .vs/
 .vscode/
 Thumbs.db
+__pycache__/
 
-# 关键文件不允许误忽略
+# 插件清单不允许误忽略
 !src/plugins/**/plugin.json
-# Plugin SDK 组装产物（tools/make_plugin_sdk.ps1 生成）
-SFM3-PluginSDK/

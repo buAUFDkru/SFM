@@ -15,6 +15,8 @@
  * 真实数据上的宽容度由 TriangulateOptions 控制。
  */
 
+#include <QtTest/QtTest>
+
 #include <QCoreApplication>
 #include <QDebug>
 
@@ -27,6 +29,11 @@
 
 #include <algorithm>
 
+#include "algorithm/CancellationToken.h"
+#include "algorithm/BundleAdjustment.h"
+#include "algorithm/IncrementalMapper.h"
+#include "algorithm/IntrinsicsResolver.h"
+#include "algorithm/SfmLogger.h"
 #include "algorithm/Initialization.h"
 #include "algorithm/MatcherService.h"
 #include "algorithm/SfmGeometry.h"
@@ -36,6 +43,9 @@
 #include "algorithm/IncrementalTriangulator.h"
 #include "algorithm/TwoViewGeometry.h"
 #include "data/SfmTypes.h"
+#include "frame/Coordinate.h"
+#include "viewmodel/FrustumBuilder.h"
+#include "viewmodel/RenderModel.h"
 
 namespace {
 
@@ -94,11 +104,19 @@ cv::Point2d project(const cv::Vec3d &Pw, const cv::Mat &R, const cv::Mat &t,
 
 } // namespace
 
-int main(int argc, char **argv)
+class SparseTest : public QObject
 {
-    QCoreApplication app(argc, argv);
+    Q_OBJECT
 
+private slots:
+    void regressionSuite();
+};
+
+void SparseTest::regressionSuite()
+{
     std::printf("========== 稀疏重建 阶段一 回归测试 ==========\n");
+    g_failed = 0;
+    g_passed = 0;
 
     // ── 场景参数 ──────────────────────────────────────────────────────────
     const int kWidth = 1280, kHeight = 720;
@@ -173,6 +191,133 @@ int main(int argc, char **argv)
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[0] 阶段一：toDisplay / CancellationToken\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        const auto d = sfm::frame::toDisplay(1.0, 2.0, 3.0);
+        check(d.x == -1.f && d.y == 2.f && d.z == -3.f, "toDisplay(x,y,z) 绕Y轴180°");
+
+        cv::Mat v = (cv::Mat_<double>(3, 1) << 4.0, -5.0, 6.0);
+        const auto dv = sfm::frame::toDisplay(v);
+        check(dv.x == -4.f && dv.y == -5.f && dv.z == -6.f, "toDisplay(cv::Mat)");
+
+        struct P { float x, y, z; } p{1.f, 2.f, 3.f};
+        sfm::frame::toDisplayInPlace(p);
+        check(p.x == -1.f && p.y == 2.f && p.z == -3.f, "toDisplayInPlace");
+        sfm::frame::toAlgorithmInPlace(p);
+        check(p.x == 1.f && p.y == 2.f && p.z == 3.f, "toAlgorithmInPlace 互逆");
+
+        sfm::CancellationToken tok;
+        check(!tok.isStopRequested(), "CancellationToken 初始未停止");
+        tok.requestStop();
+        check(tok.isStopRequested(), "requestStop 后可读");
+        tok.reset();
+        check(!tok.isStopRequested(), "reset 清除停止标志");
+
+        // FrustumBuilder：注册相机应产出 8 条棱（光心→4角 + 底面4边）
+        std::vector<CameraPose> onePose(1);
+        onePose[0].registered = true;
+        onePose[0].imageId = 0;
+        onePose[0].imageWidth = 100;
+        onePose[0].imageHeight = 100;
+        onePose[0].R = cv::Mat::eye(3, 3, CV_64F);
+        onePose[0].t = (cv::Mat_<double>(3, 1) << 0, 0, 0);
+        const auto fr = sfm::view::buildCameraFrusta(onePose, 1.0f, {"a.jpg"});
+        check(fr.lineSegments.size() == 8 * 6, "视锥 8 条线段");
+        check(fr.quadCorners.size() == 12, "视锥底面 4 角");
+        check(fr.imagePaths.size() == 1 && fr.imagePaths[0] == "a.jpg",
+              "视锥携带图像路径");
+        sfm::view::PointCloudView box;
+        box.positions = {0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10};
+        check(std::abs(sfm::view::estimateFrustumDepth(box) - 1.2f) < 1e-4f,
+              "包围盒深度 = 0.12 * 10");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[0b] IntrinsicsResolver 三级回退\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        FeatureResult feat;
+        feat.imageWidth = 640;
+        feat.imageHeight = 480;
+        const std::vector<FeatureResult> feats{feat};
+        const QStringList files{QStringLiteral("no_such_image.png")};
+
+        // 外部 K 优先
+        cv::Mat external = (cv::Mat_<double>(3, 3) << 500, 0, 320, 0, 500, 240, 0, 0, 1);
+        auto rExt = sfm::IntrinsicsResolver::resolve(external, /*useExif=*/true, files, feats);
+        check(rExt.source == sfm::IntrinsicsResolveResult::Source::External,
+              "外部 K 优先于 EXIF/FOV");
+        check(std::abs(rExt.K.at<double>(0, 0) - 500.0) < 1e-9, "外部 K 的 fx 被保留");
+
+        // 无外部、无 EXIF → FOV 估计（与 estimateK(640,480) 一致）
+        auto rFov = sfm::IntrinsicsResolver::resolve(cv::Mat(), /*useExif=*/true, files, feats);
+        check(rFov.source == sfm::IntrinsicsResolveResult::Source::FovEstimate,
+              "无 EXIF 时回落到 FOV 估计");
+        const cv::Mat expected = estimateK(640, 480);
+        check(std::abs(rFov.K.at<double>(0, 0) - expected.at<double>(0, 0)) < 1e-6 &&
+                  std::abs(rFov.K.at<double>(0, 2) - 320.0) < 1e-6,
+              "FOV 估计焦距/主点正确");
+        check(!rFov.messages.isEmpty(), "Resolver 产出日志消息");
+
+        // 关闭 EXIF 扫描时仍可 FOV 估计，且不写 EXIF 失败原因
+        auto rNoScan = sfm::IntrinsicsResolver::resolve(cv::Mat(), /*useExif=*/false, files, feats);
+        check(rNoScan.source == sfm::IntrinsicsResolveResult::Source::FovEstimate,
+              "关闭 EXIF 扫描时使用 FOV");
+        check(!rNoScan.exif.valid, "关闭扫描时 exif.valid=false");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[0c] IncrementalMapper 接受判据与 Triangulate DI\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        using sfm::IncrementalMapper;
+        check(IncrementalMapper::isBetterAttempt(10, 100, 9, 999),
+              "更高注册数优先于点数");
+        check(!IncrementalMapper::isBetterAttempt(9, 999, 10, 100),
+              "更低注册数不优");
+        check(IncrementalMapper::isBetterAttempt(10, 200, 10, 100),
+              "同分时点数更多者优");
+        check(!IncrementalMapper::isBetterAttempt(10, 50, 10, 100),
+              "同分时点数更少不优");
+
+        // 空候选 → 失败；本地 Triangulate 可注入
+        Triangulate triLocal;
+        TriangulateOptions opts = triLocal.options();
+        opts.initMinTriAngleDeg = 16.0;
+        triLocal.setOptions(opts);
+
+        sfm::IncrementalMapperConfig cfg;
+        cfg.triOptions = opts;
+        cfg.triOptions.initMinTriAngleDeg = 3.0; // 故意不同（空候选不会写入）
+        cfg.acceptRegCount = 3;
+        auto empty = IncrementalMapper::run(
+            triLocal, {}, {}, {}, ViewGraph{}, cv::Mat::eye(3, 3, CV_64F), cfg);
+        check(!empty.ok, "空候选失败");
+        check(std::abs(triLocal.options().initMinTriAngleDeg - 16.0) < 1e-9,
+              "空候选早退不改写注入的 TriangulateOptions");
+
+        // BA / Initialization / Triangulate 可栈上构造（阶段三 DI）
+        BundleAdjustment baLocal;
+        Initialization initLocal;
+        check(true, "BundleAdjustment / Initialization / Triangulate 可本地构造");
+
+        // SfmLogger 消息处理器引用计数：两次 install 需两次 uninstall 才卸下
+        SfmLogger &logger = SfmLogger::instance();
+        const int baseCount = logger.messageHandlerInstallCount();
+        logger.installAsMessageHandler();
+        logger.installAsMessageHandler();
+        check(logger.messageHandlerInstallCount() == baseCount + 2,
+              "双重 install 引用计数 +2");
+        logger.uninstallAsMessageHandler();
+        check(logger.messageHandlerInstallCount() == baseCount + 1,
+              "单次 uninstall 后仍保持安装");
+        logger.uninstallAsMessageHandler();
+        check(logger.messageHandlerInstallCount() == baseCount,
+              "对称 uninstall 恢复原计数");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     std::printf("\n[1] TriangulateOptions 默认值（对齐 COLMAP）\n");
     // ═════════════════════════════════════════════════════════════════════
     {
@@ -193,8 +338,9 @@ int main(int argc, char **argv)
     std::printf("\n[2] findInitialPairCandidates 多候选与排序\n");
     // ═════════════════════════════════════════════════════════════════════
     std::vector<InitResult> cands;
+    Initialization init;
     {
-        cands = Initialization::instance()->findInitialPairCandidates(
+        cands = init.findInitialPairCandidates(
             features, matchPairs, K, 3);
 
         check(!cands.empty(), "找到初始化候选");
@@ -208,7 +354,7 @@ int main(int argc, char **argv)
         check(sorted, "候选按评分降序排列");
 
         const InitResult single =
-            Initialization::instance()->findInitialPair(features, matchPairs, K);
+            init.findInitialPair(features, matchPairs, K);
         check(single.score >= 0.0, "findInitialPair 返回有效结果");
         if (!cands.empty()) {
             check(single.imageId1 == cands.front().imageId1 &&
@@ -226,7 +372,8 @@ int main(int argc, char **argv)
 
         std::vector<Point3D> pts;
         std::vector<CameraPose> poses;
-        const bool ok = Triangulate::instance()->triangulate(
+        Triangulate triangulator;
+        const bool ok = triangulator.triangulate(
             matchPairs, features, cands.front(), viewGraph, pts, poses,
             /*fixIntrinsics=*/true, K);
 
@@ -802,6 +949,109 @@ int main(int argc, char **argv)
               "三角化角统计有效");
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    std::printf("\n[N] 初始化优先宽基线：高内点弱视差不得压过低内点宽基线\n");
+    // ═════════════════════════════════════════════════════════════════════
+    {
+        // 无人机式俯视：相机高约 20，地面点在原点附近。
+        // 0↔1 基线短（中位角应 <12°）但匹配多；0↔2 基线宽（≥12°）但匹配少。
+        const int nNarrow = 180;
+        const int nWide = 70;
+        const int nPts = nNarrow;
+        std::vector<cv::Vec3d> pts;
+        {
+            cv::RNG rng(42);
+            for (int i = 0; i < nPts; ++i) {
+                pts.emplace_back(rng.uniform(-1.5, 1.5),
+                                 rng.uniform(-1.5, 1.5),
+                                 rng.uniform(-0.1, 0.1));
+            }
+        }
+
+        cv::Mat R0, t0, R1, t1, R2, t2;
+        makePose(cv::Vec3d(0.0, 0.0, 20.0), R0, t0);
+        makePose(cv::Vec3d(0.6, 0.0, 20.0), R1, t1);   // 窄基线 ~1.7°
+        makePose(cv::Vec3d(7.0, 0.0, 20.0), R2, t2);   // 宽基线 ~19°
+
+        std::vector<FeatureResult> feats(3);
+        const cv::Mat *Rs[] = {&R0, &R1, &R2};
+        const cv::Mat *Ts[] = {&t0, &t1, &t2};
+        for (int i = 0; i < 3; ++i) {
+            feats[i].imageId = i;
+            feats[i].imageWidth = kWidth;
+            feats[i].imageHeight = kHeight;
+            for (int k = 0; k < nPts; ++k) {
+                feats[i].keypoints.emplace_back(
+                    project(pts[k], *Rs[i], *Ts[i], K), 1.0f);
+            }
+        }
+
+        auto makePair = [&](int i, int j, int nMatch) {
+            MatchPair mp;
+            mp.imageId1 = i;
+            mp.imageId2 = j;
+            for (int k = 0; k < nMatch; ++k) {
+                mp.points1.push_back(feats[i].keypoints[k].pt);
+                mp.points2.push_back(feats[j].keypoints[k].pt);
+                mp.matches.emplace_back(k, k, 0.0f);
+            }
+            mp.matchCount = nMatch;
+            mp.modelChoice = 0;
+            mp.E = cv::findEssentialMat(mp.points1, mp.points2, K, cv::RANSAC, 0.999, 1.0);
+            mp.F = cv::findFundamentalMat(mp.points1, mp.points2, cv::FM_8POINT);
+            mp.H = cv::findHomography(mp.points1, mp.points2, cv::RANSAC, 3.0);
+            mp.geometryConfig = TWO_VIEW_CALIBRATED;
+            return mp;
+        };
+
+        std::vector<MatchPair> aerialPairs;
+        aerialPairs.push_back(makePair(0, 1, nNarrow));
+        aerialPairs.push_back(makePair(0, 2, nWide));
+
+        Initialization aerialInit;
+        const auto onlyNarrow =
+            aerialInit.findInitialPairCandidates(
+                feats, {aerialPairs[0]}, K, 1);
+        const auto onlyWide =
+            aerialInit.findInitialPairCandidates(
+                feats, {aerialPairs[1]}, K, 1);
+        check(!onlyNarrow.empty() && onlyNarrow.front().medianAngle < 12.0,
+              QString("窄基线单独评估角 <12°（实际 %1）")
+                  .arg(onlyNarrow.empty() ? -1.0 : onlyNarrow.front().medianAngle, 0, 'f', 2));
+        check(!onlyWide.empty() && onlyWide.front().medianAngle >= 12.0,
+              QString("宽基线单独评估角 ≥12°（实际 %1）")
+                  .arg(onlyWide.empty() ? -1.0 : onlyWide.front().medianAngle, 0, 'f', 2));
+
+        // 同时评估时：≥12° 的优先池会丢掉弱视差对，即使它内点更多
+        const auto aerialCands =
+            aerialInit.findInitialPairCandidates(
+                feats, aerialPairs, K, 3);
+        check(!aerialCands.empty(), "混合评估找到初始化候选");
+        if (!aerialCands.empty()) {
+            check(aerialCands.front().imageId1 == 0 &&
+                      aerialCands.front().imageId2 == 2,
+                  QString("首选宽基线 0↔2（实际 #%1↔#%2, 角=%3°）")
+                      .arg(aerialCands.front().imageId1)
+                      .arg(aerialCands.front().imageId2)
+                      .arg(aerialCands.front().medianAngle, 0, 'f', 2));
+            check(aerialCands.front().medianAngle >= 12.0,
+                  QString("首选中位角≥12°（实际 %1）")
+                      .arg(aerialCands.front().medianAngle, 0, 'f', 2));
+        }
+    }
+
     std::printf("\n========== 结果: 通过 %d, 失败 %d ==========\n", g_passed, g_failed);
-    return g_failed == 0 ? 0 : 1;
+    QVERIFY2(g_failed == 0,
+             qPrintable(QStringLiteral("失败 %1 项（通过 %2）")
+                            .arg(g_failed)
+                            .arg(g_passed)));
 }
+
+int main(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    SparseTest tc;
+    return QTest::qExec(&tc, argc, argv);
+}
+
+#include "main.moc"

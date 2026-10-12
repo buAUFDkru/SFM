@@ -1,3 +1,5 @@
+#include <QtTest/QtTest>
+
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
@@ -23,6 +25,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "algorithm/CancellationToken.h"
 #include "algorithm/Initialization.h"
 #include "algorithm/MatcherService.h"
 #include "algorithm/SfmLogger.h"
@@ -32,6 +35,7 @@
 #include "plugin/IMatcherPlugin.h"
 #include "plugin/PluginInfo.h"
 #include "plugin/PluginRegistry.h"
+#include "data/ReconstructionOutput.h"
 #include "pipeline/DenseReconstructionFactory.h"
 #include "pipeline/IDenseReconstructor.h"
 #include "pipeline/ReconstructionPipeline.h"
@@ -215,6 +219,16 @@ void runSfmLoggerTests()
         if (s.contains("captured-by-sfmlogger"))
             got = true;
     check(got, "SfmLogger installAsMessageHandler 捕获 qWarning");
+
+    // 引用计数：二次 install 后单次 uninstall 仍保持安装
+    const int base = logger.messageHandlerInstallCount();
+    logger.installAsMessageHandler();
+    logger.installAsMessageHandler();
+    check(logger.messageHandlerInstallCount() == base + 2, "SfmLogger 双重 install");
+    logger.uninstallAsMessageHandler();
+    check(logger.messageHandlerInstallCount() == base + 1, "SfmLogger 部分 uninstall");
+    logger.uninstallAsMessageHandler();
+    check(logger.messageHandlerInstallCount() == base, "SfmLogger 完全 uninstall");
     logger.clearCallbacks();
 }
 
@@ -248,7 +262,8 @@ void makeTwoViewPoints(const std::vector<cv::Point3d> &world,
 
 void runInitializationTests()
 {
-    Initialization *init = Initialization::instance();
+    Initialization initObj;
+    Initialization *init = &initObj;
     const cv::Mat K = estimateK(640, 480);
     cv::RNG rng(20260923);
 
@@ -621,7 +636,8 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
 
         ReconstructionOutput out;
         try {
-            out = pipeline.execute();
+            pipeline.execute();
+            out = pipeline.lastOutput();
         } catch (const std::exception &e) {
             check(false, QStringLiteral("管线直接路径抛出异常: %1").arg(e.what()));
         } catch (...) {
@@ -692,6 +708,49 @@ void runReconstructionPipelineSmoke(PluginRegistry &reg)
                           .availableMethods()
                           .contains("PatchMatchV2"),
                   "PatchMatchV2 已注册到 DenseReconstructionFactory");
+
+            // ADR-002：密集方法自声明 ParamSchema，越界值被拒绝
+            check(pmatcher && !pmatcher->paramSchema().isEmpty(),
+                  "PatchMatch 暴露 paramSchema");
+            QString schemaErr;
+            check(pmatcher->validateParams(
+                      QMap<QString, QVariant>{{QStringLiteral("numIterations"), 5}},
+                      &schemaErr),
+                  "PatchMatch 合法参数通过校验");
+            check(!pmatcher->validateParams(
+                      QMap<QString, QVariant>{{QStringLiteral("numIterations"), 999}},
+                      &schemaErr) &&
+                      schemaErr.contains(QStringLiteral("上限")),
+                  "PatchMatch 越界参数被拒绝");
+
+            auto pmV2 = DenseReconstructionFactory::instance().create("PatchMatchV2");
+            check(pmV2 && !pmV2->paramSchema().isEmpty(),
+                  "PatchMatchV2 暴露 paramSchema");
+            check(pmV2->validateParams(
+                      QMap<QString, QVariant>{{QStringLiteral("costTopK"), 4}},
+                      &schemaErr),
+                  "PatchMatchV2 合法参数通过校验");
+            check(!pmV2->validateParams(
+                      QMap<QString, QVariant>{{QStringLiteral("costTopK"), 0}},
+                      &schemaErr),
+                  "PatchMatchV2 越界参数被拒绝");
+
+            // ADR-003：已请求停止时 reconstruct 须立即返回「已取消」
+            {
+                sfm::CancellationToken tok;
+                tok.requestStop();
+                pmatcher->setCancellationToken(&tok);
+                DenseReconstructionInput cancelledIn;
+                cancelledIn.imageFiles << QStringLiteral("dummy.png");
+                CameraPose pose;
+                pose.registered = true;
+                cancelledIn.cameraPoses.push_back(pose);
+                const auto cancelledOut = pmatcher->reconstruct(cancelledIn);
+                check(!cancelledOut.success &&
+                          cancelledOut.errorMessage.contains(QStringLiteral("取消")),
+                      "PatchMatch 预取消时 reconstruct 返回已取消");
+                pmatcher->setCancellationToken(nullptr);
+            }
         }
     }
 
@@ -1105,7 +1164,70 @@ int run(const QString &pluginsDir)
     return failures > 0 ? 1 : 0;
 }
 
+QString resolvePluginsDir(int argc, char *argv[])
+{
+    // 优先：--plugins-dir=<path> / --plugins-dir <path> / 环境变量 SFM3_PLUGINS_DIR
+    // 不用裸路径位置参数——QtTest 会把它当成测试函数名（如 "D:"）。
+    const QByteArray envDir = qgetenv("SFM3_PLUGINS_DIR");
+    if (!envDir.isEmpty())
+        return QString::fromLocal8Bit(envDir);
+
+    for (int i = 1; i < argc; ++i) {
+        const QString a = QString::fromLocal8Bit(argv[i]);
+        const QString prefix = QStringLiteral("--plugins-dir=");
+        if (a.startsWith(prefix))
+            return a.mid(prefix.size());
+        if (a == QStringLiteral("--plugins-dir") && i + 1 < argc)
+            return QString::fromLocal8Bit(argv[i + 1]);
+    }
+    return {};
+}
+
+/// 从 argv 中剔除 --plugins-dir 及其值，避免 QtTest 误解析
+void stripPluginsDirArgs(int *argc, char **argv)
+{
+    int w = 1;
+    for (int i = 1; i < *argc; ++i) {
+        const QString a = QString::fromLocal8Bit(argv[i]);
+        if (a.startsWith(QStringLiteral("--plugins-dir=")))
+            continue;
+        if (a == QStringLiteral("--plugins-dir")) {
+            if (i + 1 < *argc)
+                ++i; // skip value
+            continue;
+        }
+        argv[w++] = argv[i];
+    }
+    *argc = w;
+    argv[w] = nullptr;
+}
+
 } // namespace
+
+class PluginTest : public QObject
+{
+    Q_OBJECT
+
+public:
+    explicit PluginTest(QString pluginsDir)
+        : m_pluginsDir(std::move(pluginsDir))
+    {
+    }
+
+private slots:
+    void suite()
+    {
+        failures = 0;
+        const int result = run(m_pluginsDir);
+        std::fprintf(stderr, "%% RESULT %d\n", result);
+        std::fprintf(stderr, "%% PLUGINS_DIR %s\n", m_pluginsDir.toLocal8Bit().constData());
+        QVERIFY2(result == 0 && failures == 0,
+                 qPrintable(QStringLiteral("plugin_test 失败数=%1").arg(failures)));
+    }
+
+private:
+    QString m_pluginsDir;
+};
 
 int main(int argc, char *argv[])
 {
@@ -1114,25 +1236,17 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
     });
 
+    QString pluginsDir = resolvePluginsDir(argc, argv);
+    stripPluginsDirArgs(&argc, argv);
+
     QCoreApplication app(argc, argv);
-
-    QString pluginsDir;
-    if (argc > 1) {
-        pluginsDir = QString::fromLocal8Bit(argv[1]);
-    } else {
+    if (pluginsDir.isEmpty()) {
         // 插件部署在 app 可执行文件同级的 plugins/ 子目录（exe 位于 release/ 下）
-        pluginsDir = QCoreApplication::applicationDirPath() + QStringLiteral("/../../../app/release/plugins");
+        pluginsDir = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/../../../app/release/plugins");
     }
-
-    const int result = run(pluginsDir);
-
-    std::fprintf(stderr, "%% RESULT %d\n", result);
-    std::fprintf(stderr, "%% PLUGINS_DIR %s\n", pluginsDir.toLocal8Bit().constData());
-
-    if (result == 0)
-        qInfo().noquote() << "=== ALL TESTS PASSED ===";
-    else
-        qCritical().noquote() << "=== TESTS FAILED ===";
-
-    return result;
+    PluginTest tc(pluginsDir);
+    return QTest::qExec(&tc, argc, argv);
 }
+
+#include "main.moc"

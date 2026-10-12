@@ -12,6 +12,7 @@
 #include <opencv2/core.hpp>
 
 #include "data/SfmTypes.h"
+#include "plugin/ParamSchema.h"
 
 namespace sfm { class ThreadPool; }
 class IMatcherWorker;
@@ -66,6 +67,9 @@ class MatcherService : public QObject
 
 public:
     explicit MatcherService(PluginRegistry *registry, QObject *parent = nullptr);
+
+    /// 编排层参数契约（写入 .sfmproj matcher.params 的键，不含插件私有键）
+    static QList<ParamSchema> orchestrationParamSchema();
 
     /**
      * @brief 特征匹配入口（编排层）

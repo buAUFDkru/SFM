@@ -62,18 +62,28 @@ void SfmLogger::log(const QString &message)
 void SfmLogger::installAsMessageHandler()
 {
     QMutexLocker lock(&m_mutex);
-    if (m_installed) return;
-    m_originalHandler = qInstallMessageHandler(SfmLogger::messageHandler);
-    m_installed = true;
+    ++m_installCount;
+    if (m_installCount == 1) {
+        m_originalHandler = qInstallMessageHandler(SfmLogger::messageHandler);
+    }
 }
 
 void SfmLogger::uninstallAsMessageHandler()
 {
     QMutexLocker lock(&m_mutex);
-    if (!m_installed) return;
-    qInstallMessageHandler(m_originalHandler);
-    m_originalHandler = nullptr;
-    m_installed = false;
+    if (m_installCount <= 0)
+        return;
+    --m_installCount;
+    if (m_installCount == 0) {
+        qInstallMessageHandler(m_originalHandler);
+        m_originalHandler = nullptr;
+    }
+}
+
+int SfmLogger::messageHandlerInstallCount() const
+{
+    QMutexLocker lock(&m_mutex);
+    return m_installCount;
 }
 
 void SfmLogger::messageHandler(QtMsgType type, const QMessageLogContext &context,
@@ -89,14 +99,14 @@ void SfmLogger::messageHandler(QtMsgType type, const QMessageLogContext &context
                               .arg(msg);
 
     QMutexLocker lock(&logger.m_mutex);
-    bool installed = logger.m_installed;
+    const int installCount = logger.m_installCount;
     QtMessageHandler original = logger.m_originalHandler;
     std::vector<LogCallback> callbacks = logger.m_callbacks;
     lock.unlock();
 
     if (callbacks.empty()) {
         // 没有 UI 回调时，转发给原始 Qt 消息处理器（恢复默认输出行为）
-        if (installed && original) {
+        if (installCount > 0 && original) {
             original(type, context, msg);
         } else {
             // 未安装时的默认行为：直接输出到 stderr/调试器

@@ -31,11 +31,11 @@ PipelineRunner::PipelineRunner(ReconstructionPipeline *pipeline, QObject *parent
     connect(m_worker, &ReconstructionWorker::finished,
             this, &PipelineRunner::onWorkerFinished);
 
-    // 转发 Triangulate 的增量更新信号（跨线程自动队列连接）
-    disconnect(Triangulate::instance(), &Triangulate::incrementalUpdate,
-               nullptr, nullptr);
-    connect(Triangulate::instance(), &Triangulate::incrementalUpdate,
-            this, &PipelineRunner::incrementalUpdate);
+    // 转发本流水线 Triangulate 的增量更新（跨线程自动队列连接）
+    if (m_pipeline) {
+        connect(&m_pipeline->triangulator(), &Triangulate::incrementalUpdate,
+                this, &PipelineRunner::incrementalUpdate);
+    }
 }
 
 PipelineRunner::~PipelineRunner()

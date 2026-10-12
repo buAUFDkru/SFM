@@ -16,7 +16,8 @@
  *   - 线程安全：内部使用 QMutex 保护回调列表
  *   - 回调机制：可注册多个日志回调，通常 UI 注册一个回调将日志显示到 LogConsole
  *   - 无回调时回退到原始 Qt 消息处理（通常是控制台/调试器输出）
- *   - 提供 Qt 消息处理函数 installAsMessageHandler()，统一接管所有 qDebug/qWarning
+ *   - installAsMessageHandler / uninstallAsMessageHandler 采用引用计数
+ *     （ADR-003）：多个 ReconstructionPipeline 并存时，最后一个 uninstall 才真正卸下
  *
  * 使用示例：
  *   SfmLogger::instance().log("[模块] 消息");
@@ -42,11 +43,14 @@ public:
     /// 输出一条日志，所有回调都会收到
     void log(const QString &message);
 
-    /// 安装为 Qt 全局消息处理器，捕获所有 qDebug/qWarning/qCritical/qFatal
+    /// 安装为 Qt 全局消息处理器（引用计数 +1；首次调用才真正 qInstall）
     void installAsMessageHandler();
 
-    /// 卸载 Qt 全局消息处理器，恢复默认行为
+    /// 卸载请求（引用计数 -1；减到 0 时才恢复默认处理器）
     void uninstallAsMessageHandler();
+
+    /// 当前消息处理器安装引用计数（测试 / 多实例析构用）
+    int messageHandlerInstallCount() const;
 
     /// 便捷模板：支持可打印类型
     template<typename T>
@@ -64,10 +68,10 @@ private:
     static void messageHandler(QtMsgType type, const QMessageLogContext &context,
                                const QString &msg);
 
-    QMutex m_mutex;
+    mutable QMutex m_mutex;
     std::vector<LogCallback> m_callbacks;
     QtMessageHandler m_originalHandler = nullptr;
-    bool m_installed = false;
+    int m_installCount = 0;
 };
 
 /// 全局便捷函数

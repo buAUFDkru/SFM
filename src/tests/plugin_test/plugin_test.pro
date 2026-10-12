@@ -1,13 +1,15 @@
-# plugin_test.pro —— 插件框架验证测试（控制台程序）
+# plugin_test —— 插件体系验证（QtTest）
 TEMPLATE = app
-CONFIG  += console
+CONFIG  += testcase console
 CONFIG  -= app_bundle
 TARGET   = plugin_test
 
-# 启用算法链依赖：测试覆盖单测/编排/重建管线（Ceres/PCL/Open3D）
+# 需要算法链依赖，覆盖描述/匹配/重建全链路（Ceres/PCL/Open3D）
 SFM3_ALG_DEPS = 1
 
 include(../../../common.pri)
+
+QT += testlib core
 
 INCLUDEPATH += ../../core
 

@@ -16,6 +16,7 @@
 #include <QTextStream>
 #include <QVBoxLayout>
 
+#include "pipeline/ReconstructionConfigIO.h"
 #include "plugin/PluginRegistry.h"
 
 ConfigPanel::ConfigPanel(PluginRegistry *registry, QWidget *parent)
@@ -89,7 +90,7 @@ void ConfigPanel::setupUI()
 
 ReconstructionConfig ConfigPanel::gatherConfig() const
 {
-    ReconstructionConfig config;
+    ReconstructionConfig config = sfm::makeDefaultReconstructionConfig();
     config.imageFiles = m_imageFiles;
     config.cameraMatrix = m_cameraMatrix;
     config.fixCameraMatrix = m_fixCameraMatrix;
