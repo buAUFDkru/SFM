@@ -49,3 +49,6 @@ Windows 单机桌面三维重建软件（C++17 / Qt Widgets / qmake），个人�
 ## 说明
 
 代码为纯AI生成
+
+DD-XFeat是我修改XFeat自己训练的
+
