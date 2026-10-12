@@ -13,9 +13,12 @@ CONFIG += c++17
 DEFINES += NOMINMAX WIN32_LEAN_AND_MEAN
 
 # ── 算法链依赖（PCL / Ceres / Open3D）────
-# 仅当使用方工程设置 SFM3_ALG_DEPS=1 后生效（core 重建管线段 / app / 相关测试）。
+# SFM3_ALG_DEPS=1：头文件 + 库（core / 算法测试）
+# SFM3_ALG_LINK=1：仅链接库，不增加 INCLUDEPATH（UI 链接静态 sfmcore 用）
 # PCL FLANN 必须在 OpenCV 之前 include，否则 flann 命名空间会被 cvflann 覆盖。
+SFM3_NEED_ALG_LIBS = 0
 equals(SFM3_ALG_DEPS, 1) {
+    SFM3_NEED_ALG_LIBS = 1
     DEFINES += EIGEN_MAX_ALIGN_BYTES=32
     DEFINES += GLOG_USE_GLOG_EXPORT GLOG_STATIC_DEFINE
     DEFINES += _SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING
@@ -28,7 +31,14 @@ equals(SFM3_ALG_DEPS, 1) {
     INCLUDEPATH += $$CERES_ROOT/glogLib/include
     INCLUDEPATH += $$OPEN3D_ROOT/include
     INCLUDEPATH += $$OPEN3D_ROOT/include/open3d/3rdparty
-
+}
+equals(SFM3_ALG_LINK, 1) {
+    SFM3_NEED_ALG_LIBS = 1
+    DEFINES += EIGEN_MAX_ALIGN_BYTES=32
+    DEFINES += GLOG_USE_GLOG_EXPORT GLOG_STATIC_DEFINE
+    DEFINES += _SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING
+}
+equals(SFM3_NEED_ALG_LIBS, 1) {
     win32 {
         CONFIG(debug, debug|release) {
             LIBS += -l$$PCL_ROOT/lib/pcl_commond
@@ -56,8 +66,6 @@ equals(SFM3_ALG_DEPS, 1) {
             LIBS += -l$$CERES_ROOT/glogLib/lib/glog
         }
         LIBS += -L$$OPEN3D_ROOT/lib -lOpen3D
-        # 注：Open3D.dll 的部署交由 tools/ 部署脚本或运行时 PATH（$$OPEN3D_ROOT/bin）
-        # 完成；不在此处 QMAKE_POST_LINK 拷贝（大文件首次落盘易被安全软件锁死导致退出码1）。
     }
 }
 
