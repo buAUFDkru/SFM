@@ -12,7 +12,6 @@ Windows 单机桌面三维重建软件（C++17 / Qt Widgets / qmake）。主流�
 | 组件 | 建议版本 | 说明 |
 |------|----------|------|
 | Qt | 6.10.x（msvc2022_64） | Widgets / OpenGL |
-| MSVC | Visual Studio 2022 | `win32-msvc` |
 | OpenCV | 4.6（world，含 contrib） | 图像 / 特征 / 几何 |
 | PCL | 1.15.x | 点云 IO 等（经 `SFM3_ALG_DEPS`） |
 | Ceres | 2.2 | Bundle Adjustment（含 glog） |
@@ -30,17 +29,7 @@ Windows 单机桌面三维重建软件（C++17 / Qt Widgets / qmake）。主流�
 ## 编译
 
 1. 安装上述依赖，并按本机路径修改 `common.pri`（或设置环境变量）。  
-2. 打开「x64 Native Tools」或先执行 `vcvars64.bat`。  
-3. 在仓库根目录生成并编译（示例为 Release）：
-
-```bat
-mkdir build\release
-cd build\release
-qmake ..\..\sfm3.0.pro -spec win32-msvc "CONFIG+=release"
-nmake
-```
-
-或用 Qt Creator 打开 `sfm3.0.pro`，选择 Desktop Qt 6.x MSVC 套件后构建。
+2. 用 Qt Creator 打开 `sfm3.0.pro`，选择 Desktop Qt 6.x MSVC 套件后构建。
 
 产物大致位置：
 
