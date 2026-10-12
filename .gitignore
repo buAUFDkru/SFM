@@ -10,8 +10,7 @@
 /delivery/
 /docs/
 /templates/
-/tools/*
-!/tools/make_plugin_sdk.ps1
+/tools/
 
 # 编译生成物与临时文件
 *.obj
